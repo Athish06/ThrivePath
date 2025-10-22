@@ -297,13 +297,14 @@ async def start_session(session_id: int, therapist_id: int = None) -> Optional[S
     """
     return await update_session_status(session_id, SESSION_STATUS["ONGOING"], therapist_id)
 
-async def complete_session(session_id: int, therapist_id: int = None) -> Optional[SessionStatusResponse]:
+async def complete_session(session_id: int, therapist_id: int = None, therapist_notes: str = None) -> Optional[SessionStatusResponse]:
     """
     Complete an ongoing session (change status to completed)
     
     Args:
         session_id: ID of session to complete
         therapist_id: ID of therapist completing the session
+        therapist_notes: Optional notes from therapist about the session
     
     Returns:
         SessionStatusResponse with status change details
@@ -312,8 +313,167 @@ async def complete_session(session_id: int, therapist_id: int = None) -> Optiona
         - Called when session ends
         - Can be triggered manually or automatically at session end time
         - Updates status from 'ongoing' to 'completed'
+        - Saves therapist notes if provided
+        - For assessment sessions (temporary students), updates assessment_details in children table
     """
-    return await update_session_status(session_id, SESSION_STATUS["COMPLETED"], therapist_id)
+    try:
+        supabase = get_supabase_client()
+        
+        # First update the session status
+        result = await update_session_status(session_id, SESSION_STATUS["COMPLETED"], therapist_id)
+        
+        if result and therapist_notes is not None:
+            # Update therapist notes
+            update_data = {
+                'therapist_notes': therapist_notes,
+                'updated_at': utc_now_iso()
+            }
+            
+            notes_result = supabase.table('sessions').update(update_data).eq('id', session_id).execute()
+            handle_supabase_error(notes_result)
+            
+            if notes_result.data:
+                logger.info(f"Updated therapist notes for session {session_id}")
+            else:
+                logger.warning(f"Failed to update therapist notes for session {session_id}")
+        
+        if result:
+            # Check if this is an assessment session and update assessment details
+            await _update_assessment_details_for_child(session_id)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error completing session {session_id}: {e}")
+        raise
+
+async def _update_assessment_details_for_child(session_id: int) -> None:
+    """
+    Update assessment details in children table after assessment session completion
+    - Reads session_activities for assessment tools (ISAA, INDT, Clinical Snapshots)
+    - Extracts scores from performance_notes
+    - Updates assessment_details JSONB column in children table
+    - Promotes status from 'assessment_due' to 'active' if criteria met
+    
+    Args:
+        session_id: ID of the completed session
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Assessment tool activity IDs
+        ASSESSMENT_TOOL_IDS = {
+            9: 'isaa',
+            10: 'indt-adhd',
+            11: 'clinical-snapshots'
+        }
+        
+        # Get session details to find the child
+        session_result = supabase.table('sessions').select('child_id').eq('id', session_id).single().execute()
+        if not session_result.data:
+            logger.info(f"Session {session_id} not found")
+            return
+        
+        child_id = session_result.data['child_id']
+        
+        # Get session activities for this session
+        activities_result = supabase.table('session_activities').select('''
+            id,
+            child_goal_id,
+            actual_duration,
+            performance_notes,
+            child_goals!child_goal_id (
+                activity_id
+            )
+        ''').eq('session_id', session_id).execute()
+        
+        if not activities_result.data:
+            logger.info(f"No activities found for session {session_id}")
+            return
+        
+        # Check if any activities are assessment tools
+        assessment_data = {}
+        has_assessment_tools = False
+        
+        for activity in activities_result.data:
+            child_goal = activity.get('child_goals')
+            if not child_goal:
+                continue
+            
+            activity_id = child_goal.get('activity_id')
+            if activity_id in ASSESSMENT_TOOL_IDS:
+                has_assessment_tools = True
+                tool_key = ASSESSMENT_TOOL_IDS[activity_id]
+                
+                # Parse performance_notes to extract scores
+                # Expected format: JSON string with assessment items and scores
+                performance_notes = activity.get('performance_notes', '')
+                if performance_notes:
+                    try:
+                        import json
+                        scores = json.loads(performance_notes)
+                        
+                        # Calculate average if items present
+                        if isinstance(scores, dict) and 'items' in scores:
+                            items = scores['items']
+                            if items:
+                                score_values = [v for v in items.values() if isinstance(v, (int, float))]
+                                if score_values:
+                                    average = sum(score_values) / len(score_values)
+                                    assessment_data[tool_key] = {
+                                        'items': items,
+                                        'average': round(average, 2)
+                                    }
+                    except (json.JSONDecodeError, TypeError, KeyError) as e:
+                        logger.warning(f"Could not parse assessment scores for activity {activity['id']}: {e}")
+                        continue
+        
+        if not has_assessment_tools:
+            logger.info(f"Session {session_id} does not contain assessment tools")
+            return
+        
+        # Get current child assessment details and prior_diagnosis status
+        child_result = supabase.table('children').select('assessment_details, prior_diagnosis, status').eq('id', child_id).single().execute()
+        if not child_result.data:
+            logger.warning(f"Child {child_id} not found")
+            return
+        
+        current_assessment = child_result.data.get('assessment_details') or {}
+        prior_diagnosis = child_result.data.get('prior_diagnosis', False)
+        current_status = child_result.data.get('status', 'assessment_due')
+        
+        # Merge new assessment data with existing
+        updated_assessment = {**current_assessment, **assessment_data}
+        
+        # Determine if child should be promoted to 'active' status
+        # Rules:
+        # - Prior diagnosis: needs clinical-snapshots OR any other assessment
+        # - No prior diagnosis: needs ISAA or INDT (non-snapshot assessment)
+        has_clinical_snapshot = 'clinical-snapshots' in updated_assessment
+        has_non_snapshot = 'isaa' in updated_assessment or 'indt-adhd' in updated_assessment
+        
+        should_be_active = False
+        if prior_diagnosis:
+            should_be_active = has_clinical_snapshot or has_non_snapshot
+        else:
+            should_be_active = has_non_snapshot
+        
+        # Update children table
+        update_data = {
+            'assessment_details': updated_assessment,
+            'updated_at': utc_now_iso()
+        }
+        
+        # Promote to active if criteria met and currently assessment_due
+        if should_be_active and current_status == 'assessment_due':
+            update_data['status'] = 'active'
+            logger.info(f"Promoting child {child_id} from assessment_due to active")
+        
+        supabase.table('children').update(update_data).eq('id', child_id).execute()
+        logger.info(f"Updated assessment details for child {child_id} from session {session_id}")
+        
+    except Exception as e:
+        logger.error(f"Error updating assessment details for session {session_id}: {e}")
+        # Don't raise - we don't want to fail session completion if assessment update fails
 
 async def cancel_session(session_id: int, therapist_id: int = None) -> Optional[SessionStatusResponse]:
     """

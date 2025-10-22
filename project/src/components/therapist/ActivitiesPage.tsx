@@ -2,15 +2,24 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { useData } from '../../context/DataContext';
-import { Search, Filter, User, Clock, AlertCircle, RefreshCw, Activity, Target, Zap } from 'lucide-react';
+import { Search, User, Clock, AlertCircle, RefreshCw, Activity, Target, Zap } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { LoadingSpinner } from '../shared/LoadingSpinner';
+import { FilterDropdown, FilterOption } from '../shared/FilterDropdown';
 
 export const ActivitiesPage: React.FC = () => {
   const { littleLearners, loading, error, refreshLearners, refreshLearnersPage } = useData();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('all');
   const navigate = useNavigate();
+
+  const activityFilterOptions: FilterOption[] = [
+    { value: 'all', label: 'All Status', icon: <User className="h-4 w-4" />, color: 'slate' },
+    { value: 'active', label: 'Active', icon: <Zap className="h-4 w-4" />, color: 'emerald' },
+    { value: 'new', label: 'New Enrollments', icon: <Target className="h-4 w-4" />, color: 'blue' },
+    { value: 'assessment_due', label: 'Assessment Due', icon: <AlertCircle className="h-4 w-4" />, color: 'amber' },
+    { value: 'inactive', label: 'Inactive', icon: <Clock className="h-4 w-4" />, color: 'slate' },
+  ];
 
   // Refresh data every time the component mounts
   useEffect(() => {
@@ -127,20 +136,14 @@ export const ActivitiesPage: React.FC = () => {
                 className="w-full rounded-xl border border-slate-200/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/60 pl-12 pr-4 py-3 text-sm text-slate-800 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-violet-500"
               />
             </div>
-            <div className="relative w-full md:w-auto">
-              <Filter className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-400" />
-              <select
+            <div className="w-full md:w-auto">
+              <FilterDropdown
+                options={activityFilterOptions}
                 value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="w-full md:w-[200px] appearance-none rounded-xl border border-slate-200/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/60 pl-12 pr-10 py-3 text-sm text-slate-800 dark:text-white focus:border-transparent focus:outline-none focus:ring-2 focus:ring-violet-500"
-              >
-                <option value="all">All Status</option>
-                <option value="active">Active</option>
-                <option value="new">New Enrollments</option>
-                <option value="assessment_due">Assessment Due</option>
-                <option value="inactive">Inactive</option>
-              </select>
-              <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">▾</span>
+                onChange={setSelectedStatus}
+                placeholder="Filter by status"
+                className="w-full md:w-[220px]"
+              />
             </div>
           </div>
 

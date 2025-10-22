@@ -964,7 +964,9 @@ def _build_activity_chat_prompt(
     session_data: Dict[str, Any],
     user_query: str,
     ai_preferences: Optional[str] = None,
-    session_notes: Optional[List[Dict[str, Any]]] = None
+    session_notes: Optional[List[Dict[str, Any]]] = None,
+    focus_context: Optional[Dict[str, Any]] = None,
+    notes_instruction: Optional[str] = None
 ) -> str:
     history_text = _format_history_for_prompt(session_data.get("history", []))
     learner_context = session_data.get("learner_context", "")
@@ -1002,11 +1004,75 @@ IMPORTANT: Use these session notes to understand:
 - Customize activity recommendations based on these real-world observations
 """
 
+        if notes_instruction and notes_instruction.strip():
+            notes_section += f"""
+THERAPIST GUIDANCE ON SESSION NOTES:
+{notes_instruction.strip()}
+
+Always integrate the therapist's guidance above when analyzing the attached session notes.
+"""
+
+    focus_section = ""
+    if focus_context and isinstance(focus_context, dict):
+        activities = focus_context.get("activities") or []
+        if isinstance(activities, list) and activities:
+            label = focus_context.get("label") or "Therapist-selected activities"
+            instruction = focus_context.get("instruction")
+            source = focus_context.get("source")
+
+            focus_lines: List[str] = []
+            for index, activity in enumerate(activities, start=1):
+                name = activity.get("activity_name") or activity.get("name") or "Activity"
+                domain = activity.get("domain")
+                status = activity.get("status")
+                duration = activity.get("actual_duration") or activity.get("estimated_duration")
+                description = activity.get("description") or activity.get("activity_description")
+                difficulty_level = activity.get("difficulty_level")
+                performance_notes = activity.get("performance_notes")
+                
+                detail_parts: List[str] = []
+                if domain:
+                    detail_parts.append(f"Domain: {domain}")
+                if status:
+                    detail_parts.append(f"Status: {status}")
+                if duration:
+                    detail_parts.append(f"Duration: {duration} min")
+                if difficulty_level:
+                    detail_parts.append(f"Difficulty: Level {difficulty_level}")
+
+                descriptor = " | ".join(detail_parts) if detail_parts else ""
+                line = f"{index}. {name}"
+                if descriptor:
+                    line += f" ({descriptor})"
+                if description:
+                    line += f"\n   Description: {description}"
+                if performance_notes:
+                    line += f"\n   Performance notes: {performance_notes}"
+                focus_lines.append(line)
+
+            focus_text = "\n".join(focus_lines)
+            focus_section = f"""
+THERAPIST-SELECTED ACTIVITIES ({label}):
+{focus_text}
+"""
+
+            if source:
+                focus_section += f"\n(Selection source: {source})\n"
+
+            if instruction and instruction.strip():
+                focus_section += f"""
+
+THERAPIST'S REQUEST FOR THESE ACTIVITIES:
+{instruction.strip()}
+
+IMPORTANT: This is the therapist's specific instruction about what to do with the attached activities. Address this directly in your response.
+"""
+
     return f"""You are an empathetic pediatric therapy assistant supporting licensed therapists. Use the learner context and conversation history to provide thoughtful, clinically-sound guidance.
 
 LEARNER CONTEXT:
 {learner_context}
-{preferences_section}{notes_section}
+{preferences_section}{notes_section}{focus_section}
 CONVERSATION HISTORY:
 {history_text}
 
@@ -1018,6 +1084,7 @@ RESPONSE INSTRUCTIONS:
 - When the therapist requests specific therapeutic activities, include detailed activity plans aligned with the learner's medical and assessment information.
 - If custom AI instructions are provided, follow them closely while maintaining professional standards.
 - If session notes are included, reference behavioral patterns and time-of-day preferences when suggesting activities.
+- If therapist-selected activities are provided with instructions, address those instructions directly and specifically.
 - For casual or administrative questions, respond conversationally without fabricating medical facts.
 - Never invent diagnoses or promise clinical outcomes.
 - Keep responses concise yet actionable.
@@ -1062,14 +1129,23 @@ async def generate_activity_chat_messages(
     session_id: str,
     user_query: str,
     ai_preferences: Optional[str] = None,
-    session_notes: Optional[List[Dict[str, Any]]] = None
+    session_notes: Optional[List[Dict[str, Any]]] = None,
+    focus_context: Optional[Dict[str, Any]] = None,
+    notes_instruction: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Generate assistant messages using stored session context and history."""
     session_data = await activity_session_manager.get_session(session_id)
 
     await activity_session_manager.append_history(session_id, "user", user_query)
 
-    prompt = _build_activity_chat_prompt(session_data, user_query, ai_preferences, session_notes)
+    prompt = _build_activity_chat_prompt(
+        session_data,
+        user_query,
+        ai_preferences,
+        session_notes,
+        focus_context,
+        notes_instruction
+    )
 
     payload = {
         "contents": [

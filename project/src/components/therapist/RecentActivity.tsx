@@ -1,41 +1,30 @@
 import { motion } from 'framer-motion';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
 import { StickyNote } from 'lucide-react';
-
-const recentActivities = [
-  {
-    id: '1',
-    message: 'Session completed with Emma Johnson',
-    time: '2 hours ago',
-    color: 'bg-green-500',
-  },
-  {
-    id: '2',
-    message: 'New assessment scheduled for Liam Smith',
-    time: '4 hours ago',
-    color: 'bg-blue-500',
-  },
-  {
-    id: '3',
-    message: 'Progress report generated for Sophia Davis',
-    time: '1 day ago',
-    color: 'bg-purple-500',
-  },
-  {
-    id: '4',
-    message: 'Homework assigned to Emma Johnson',
-    time: '2 days ago',
-    color: 'bg-orange-500',
-  },
-  {
-    id: '5',
-    message: 'Parent meeting scheduled',
-    time: '3 days ago',
-    color: 'bg-teal-500',
-  },
-];
+import { useData } from '../../context/DataContext';
+import { useAuth } from '../../context/AuthContext';
+import { useEffect } from 'react';
 
 export const RecentActivity = () => {
+  const { recentActivities, addActivity } = useData();
+  const { user } = useAuth();
+
+  // Add login activity when component first mounts and user is authenticated
+  useEffect(() => {
+    const hasLoggedInThisSession = sessionStorage.getItem('login_activity_added');
+    
+    if (user && !hasLoggedInThisSession) {
+      // Check if there's a login activity from this session already
+      const hasRecentLogin = recentActivities.some(
+        (act) => act.type === 'login' && Date.now() - act.timestamp < 60000 // Within last minute
+      );
+
+      if (!hasRecentLogin) {
+        addActivity(`You just logged in as ${user.name || user.email}`, 'login');
+        sessionStorage.setItem('login_activity_added', 'true');
+      }
+    }
+  }, [user, addActivity, recentActivities]);
   return (
     <motion.div
       initial={{ opacity: 0, x: 30 }}
@@ -51,7 +40,14 @@ export const RecentActivity = () => {
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
-            {recentActivities.map((activity: any, index: number) => (
+            {recentActivities.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="text-sm text-muted-foreground">
+                  No recent activities yet. Start by adding a learner, scheduling a session, or completing an assessment.
+                </p>
+              </div>
+            ) : (
+              recentActivities.map((activity: any, index: number) => (
               <motion.div
                 key={activity.id}
                 initial={{ opacity: 0, y: 20 }}
@@ -71,7 +67,8 @@ export const RecentActivity = () => {
                   </div>
                 </div>
               </motion.div>
-            ))}
+              ))
+            )}
           </div>
         </CardContent>
       </Card>

@@ -1,20 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
 import {
   Calendar,
   CalendarClock,
   CalendarPlus,
+  CalendarDays,
   Clock,
+  Layers,
   User,
   Plus,
   BookOpen,
   Settings,
-  Activity,
   RefreshCw,
   CheckCircle,
   Ban,
   Copy,
-  Download
+  PlayCircle,
+  Search,
+  XCircle
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useData } from '../../context/DataContext';
@@ -23,6 +27,24 @@ import { SessionAddModal } from './SessionAddModal';
 import { LearnerTypeSelectionModal } from './LearnerTypeSelectionModal';
 import { Dropdown, DropdownItem, DropdownSeparator } from '../ui/dropdown';
 import { SessionRescheduleModal } from './SessionRescheduleModal';
+import { SessionRescheduleStepperModal } from './SessionRescheduleStepperModal';
+import {
+  startSessionRequest,
+  completeSessionRequest,
+  SessionNeedsRescheduleError,
+  cascadeRescheduleRequest,
+  SessionRescheduleDetail,
+  CascadeRescheduleResponse
+} from '../../utils/sessionActions';
+import {
+  deriveEndTimeFromDuration,
+  getSessionDurationMinutes,
+  isSessionOngoing,
+  isSessionStartable,
+  normalizeTimeValue,
+  statusDisplayLabel
+} from '../../utils/sessionUtils';
+import { FilterDropdown, FilterOption } from '../shared/FilterDropdown';
 
 interface Session {
   id: number;
@@ -47,6 +69,7 @@ interface Session {
 export const SessionsList: React.FC = () => {
   const { user } = useAuth();
   const { myStudents, tempStudents, backendSessions, sessionsLoading, refreshSessionsPage } = useData();
+  const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -54,8 +77,46 @@ export const SessionsList: React.FC = () => {
   const [selectedLearnerType, setSelectedLearnerType] = useState<'general' | 'temporary' | null>(null);
   const [activeOptionsSessionId, setActiveOptionsSessionId] = useState<number | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<Session | null>(null);
+  const [pendingRescheduleSession, setPendingRescheduleSession] = useState<Session | null>(null);
+  const [rescheduleValidationDetail, setRescheduleValidationDetail] = useState<SessionRescheduleDetail | null>(null);
+  const [showRescheduleStepper, setShowRescheduleStepper] = useState(false);
+  const [isCascadeSubmitting, setIsCascadeSubmitting] = useState(false);
   const [isUpdatingSessionId, setIsUpdatingSessionId] = useState<number | null>(null);
   const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedStatus, setSelectedStatus] = useState('all');
+
+  const sessionFilterOptions: FilterOption[] = [
+    {
+      value: 'all',
+      label: 'All Sessions',
+      icon: <Layers className="h-4 w-4" />
+    },
+    {
+      value: 'scheduled',
+      label: 'Scheduled',
+      icon: <CalendarDays className="h-4 w-4 text-violet-500" />,
+      color: 'violet'
+    },
+    {
+      value: 'ongoing',
+      label: 'Ongoing',
+      icon: <Clock className="h-4 w-4 text-blue-500" />,
+      color: 'blue'
+    },
+    {
+      value: 'completed',
+      label: 'Completed',
+      icon: <CheckCircle className="h-4 w-4 text-emerald-500" />,
+      color: 'emerald'
+    },
+    {
+      value: 'cancelled',
+      label: 'Cancelled',
+      icon: <XCircle className="h-4 w-4 text-rose-500" />,
+      color: 'rose'
+    }
+  ];
 
 
   // Load data on component mount - DataContext handles this automatically
@@ -78,8 +139,10 @@ export const SessionsList: React.FC = () => {
       const token = localStorage.getItem('access_token');
       
       // Find the selected learner from the appropriate student list
-      const studentList = selectedLearnerType === 'temporary' ? tempStudents : myStudents;
-      const selectedLearner = studentList.find((student: any) =>
+      const learnerIdFromForm = sessionData.learnerId ?? sessionData.child_id;
+      const combinedStudents = [...myStudents, ...tempStudents];
+      const selectedLearner = combinedStudents.find((student: any) =>
+        (learnerIdFromForm !== undefined && Number(student.id) === Number(learnerIdFromForm)) ||
         student.name === sessionData.learner
       );
       
@@ -88,18 +151,49 @@ export const SessionsList: React.FC = () => {
         return;
       }
 
+      const isAssessmentSession = Boolean(sessionData.isAssessmentSession);
+      
+      // Map assessment tool strings to activity IDs
+      const ASSESSMENT_TOOL_TO_ACTIVITY_ID: Record<string, number> = {
+        'isaa': 9,
+        'indt': 10,
+        'clinical-snapshots': 11
+      };
+      
+      let sessionActivities = [];
+      
+      if (isAssessmentSession && Array.isArray(sessionData.assessmentTools)) {
+        // For assessment sessions, send activity_id directly
+        // Backend will create child_goals automatically
+        sessionActivities = sessionData.assessmentTools
+          .map((toolId: string) => {
+            const activityId = ASSESSMENT_TOOL_TO_ACTIVITY_ID[toolId];
+            if (!activityId) return null;
+            
+            return {
+              activity_id: activityId,
+              actual_duration: 0, // Will be filled during assessment
+              performance_notes: ''
+            };
+          })
+          .filter((item: any) => item !== null);
+      } else if (Array.isArray(sessionData.childGoals)) {
+        // Regular session with pre-selected child_goals
+        sessionActivities = sessionData.childGoals.map((childGoalId: number) => ({
+          child_goal_id: childGoalId,
+          actual_duration: 30, // Default duration, can be updated later
+          performance_notes: ''
+        }));
+      }
+
       // Convert the sessionData format to backend format
       const backendData = {
         child_id: parseInt(selectedLearner.id.toString()),  // Ensure it's a number
         session_date: sessionData.date,
-        start_time: sessionData.time,
-        end_time: calculateEndTime(sessionData.time, 60), // Default 60 min session
+        start_time: sessionData.startTime,
+        end_time: sessionData.endTime,
         therapist_notes: sessionData.notes || '',
-        session_activities: sessionData.childGoals?.map((childGoalId: number) => ({
-          child_goal_id: childGoalId,
-          actual_duration: 30, // Default duration, can be updated later
-          performance_notes: ''
-        })) || []
+        session_activities: sessionActivities
       };
 
       const response = await fetch('http://localhost:8000/api/sessions', {
@@ -115,6 +209,15 @@ export const SessionsList: React.FC = () => {
         setShowCreateModal(false);
         try {
           const createdSession = await response.json();
+          
+          // Add activity tracking for session creation
+          window.dispatchEvent(new CustomEvent('activityAdded', { 
+            detail: { 
+              message: `New session scheduled with ${sessionData.learner}`,
+              type: 'session'
+            }
+          }));
+          
           window.dispatchEvent(new CustomEvent('scheduleChanged', { detail: { session: createdSession } }));
         } catch (e) {
           window.dispatchEvent(new CustomEvent('scheduleChanged'));
@@ -129,35 +232,22 @@ export const SessionsList: React.FC = () => {
     }
   };
 
-  const calculateEndTime = (startTime: string, durationMinutes: number): string => {
-    const [hours, minutes] = startTime.split(':').map(Number);
-    const startDate = new Date();
-    startDate.setHours(hours, minutes, 0, 0);
-    
-    const endDate = new Date(startDate.getTime() + durationMinutes * 60000);
-    
-    return `${endDate.getHours().toString().padStart(2, '0')}:${endDate.getMinutes().toString().padStart(2, '0')}`;
-  };
+  
 
-  const normalizeTimeValue = (timeString: string) => {
-    if (!timeString) return '00:00';
-    return timeString.length >= 5 ? timeString.slice(0, 5) : timeString;
-  };
+  const buildCascadeSuccessMessage = (result: CascadeRescheduleResponse) => {
+    const sessionSummaries = result.sessions.slice(0, 3).map((session) => {
+      const learner = session.student_name || 'Learner';
+      const newDate = formatDate(session.new_date);
+      const start = formatTime(session.start_time);
+      const end = formatTime(session.end_time);
+      return `${learner}: ${newDate} • ${start} - ${end}`;
+    });
 
-  const getSessionDurationMinutes = (session: Session) => {
-    const start = normalizeTimeValue(session.start_time);
-    const end = normalizeTimeValue(session.end_time);
+    const additionalCount = Math.max(result.sessions.length - sessionSummaries.length, 0);
+    const summaryTail = additionalCount > 0 ? `, +${additionalCount} more session${additionalCount === 1 ? '' : 's'}` : '';
+    const detailText = sessionSummaries.length ? sessionSummaries.join('; ') : 'No sessions updated.';
 
-    const [startHour, startMinute] = start.split(':').map(Number);
-    const [endHour, endMinute] = end.split(':').map(Number);
-
-    const startDate = new Date();
-    const endDate = new Date();
-    startDate.setHours(startHour, startMinute, 0, 0);
-    endDate.setHours(endHour, endMinute, 0, 0);
-
-    const diff = (endDate.getTime() - startDate.getTime()) / 60000;
-    return diff > 0 ? diff : 60;
+    return `Shifted ${result.total_updated} session${result.total_updated === 1 ? '' : 's'} forward. ${detailText}${summaryTail}`;
   };
 
   const handleRescheduleSubmit = async ({ date, time }: { date: string; time: string }) => {
@@ -174,8 +264,8 @@ export const SessionsList: React.FC = () => {
     setIsUpdatingSessionId(rescheduleTarget.id);
 
     try {
-      const durationMinutes = getSessionDurationMinutes(rescheduleTarget);
-      const endTime = calculateEndTime(time, durationMinutes);
+  const durationMinutes = getSessionDurationMinutes(rescheduleTarget);
+  const endTime = deriveEndTimeFromDuration(time, durationMinutes);
 
       const response = await fetch(`http://localhost:8000/api/sessions/${rescheduleTarget.id}`, {
         method: 'PUT',
@@ -211,6 +301,136 @@ export const SessionsList: React.FC = () => {
     }
   };
 
+  const closeRescheduleFlow = () => {
+    setShowRescheduleStepper(false);
+    setRescheduleValidationDetail(null);
+    setPendingRescheduleSession(null);
+    setIsCascadeSubmitting(false);
+  };
+
+  const handleManualRescheduleSelect = () => {
+    if (!rescheduleValidationDetail?.session?.id) {
+      closeRescheduleFlow();
+      return;
+    }
+
+    const sessionId = rescheduleValidationDetail.session.id;
+    const existingSession = backendSessions.find((session) => session.id === sessionId);
+    const fallbackSession = existingSession ?? pendingRescheduleSession;
+
+    if (fallbackSession) {
+      setRescheduleTarget(fallbackSession);
+    } else {
+      setActionFeedback({
+        type: 'error',
+        message: 'Unable to open reschedule modal for this session. Please try again from the sessions list.'
+      });
+    }
+
+    closeRescheduleFlow();
+  };
+
+  const handleManualRescheduleFromCascade = (sessionId: number) => {
+    const targetSession = backendSessions.find((session) => session.id === sessionId);
+
+    if (!targetSession) {
+      setActionFeedback({
+        type: 'error',
+        message: 'Unable to locate that session for manual editing. Please refresh and try again.'
+      });
+      return;
+    }
+
+    closeRescheduleFlow();
+    window.setTimeout(() => {
+      setRescheduleTarget(targetSession);
+    }, 0);
+  };
+
+  const handleCascadeRescheduleConfirm = async (includeWeekends: boolean): Promise<CascadeRescheduleResponse> => {
+    if (!rescheduleValidationDetail?.session?.id) {
+      throw new Error('Missing session information for cascade rescheduling.');
+    }
+
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      setActionFeedback({ type: 'error', message: 'Missing access token. Please log in again.' });
+      throw new Error('Authentication required.');
+    }
+
+    setIsCascadeSubmitting(true);
+
+    try {
+      const response = await cascadeRescheduleRequest(
+        rescheduleValidationDetail.session.id,
+        token,
+        includeWeekends
+      );
+
+      setActionFeedback({
+        type: 'success',
+        message: buildCascadeSuccessMessage(response)
+      });
+
+      window.dispatchEvent(new CustomEvent('scheduleChanged'));
+      return response;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to cascade reschedule sessions';
+      setActionFeedback({ type: 'error', message });
+      throw error instanceof Error ? error : new Error(message);
+    } finally {
+      setIsCascadeSubmitting(false);
+      await refreshSessionsPage();
+    }
+  };
+
+  const handleStartSession = async (session: Session) => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      setActionFeedback({ type: 'error', message: 'Missing access token. Please log in again.' });
+      return;
+    }
+
+    setIsUpdatingSessionId(session.id);
+
+    try {
+      await startSessionRequest(session.id, token);
+
+      setActionFeedback({
+        type: 'success',
+        message: `Started session with ${session.student_name || 'learner'}.`
+      });
+
+      window.dispatchEvent(new CustomEvent('scheduleChanged'));
+      navigate('/sessions/active');
+    } catch (err) {
+      if (err instanceof SessionNeedsRescheduleError) {
+        const fallbackSummary = {
+          id: session.id,
+          session_date: session.session_date,
+          start_time: session.start_time,
+          end_time: session.end_time,
+          student_name: session.student_name
+        };
+
+        setPendingRescheduleSession(session);
+        setRescheduleValidationDetail({
+          ...err.detail,
+          session: err.detail?.session ?? fallbackSummary,
+          message: err.message || err.detail?.message
+        });
+        setShowRescheduleStepper(true);
+        setActionFeedback({ type: 'error', message: err.message });
+      } else {
+        const message = err instanceof Error ? err.message : 'Failed to start session';
+        setActionFeedback({ type: 'error', message });
+      }
+    } finally {
+      setIsUpdatingSessionId(null);
+      await refreshSessionsPage();
+    }
+  };
+
   const handleMarkCompleted = async (session: Session) => {
     const token = localStorage.getItem('access_token');
     if (!token) {
@@ -221,23 +441,20 @@ export const SessionsList: React.FC = () => {
     setIsUpdatingSessionId(session.id);
 
     try {
-      const response = await fetch(`http://localhost:8000/api/sessions/${session.id}/complete`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
-        throw new Error(errorData?.detail || 'Failed to mark session as completed');
-      }
+      await completeSessionRequest(session.id, token);
 
       setActionFeedback({
         type: 'success',
         message: `Marked session with ${session.student_name || 'learner'} as completed.`
       });
+
+      // Add activity tracking
+      window.dispatchEvent(new CustomEvent('activityAdded', { 
+        detail: { 
+          message: `Session completed with ${session.student_name || 'learner'}`,
+          type: 'session'
+        }
+      }));
 
       window.dispatchEvent(new CustomEvent('scheduleChanged'));
     } catch (err) {
@@ -390,10 +607,30 @@ export const SessionsList: React.FC = () => {
     return () => window.clearTimeout(timeoutId);
   }, [actionFeedback]);
 
+  const filteredSessions = useMemo(() => {
+    return backendSessions.filter((session) => {
+      const normalizedSearch = searchTerm.trim().toLowerCase();
+      const matchesSearch =
+        normalizedSearch.length === 0 ||
+        session.student_name?.toLowerCase().includes(normalizedSearch) ||
+        session.status.toLowerCase().includes(normalizedSearch);
+
+      const matchesStatus =
+        selectedStatus === 'all' ||
+        (selectedStatus === 'ongoing' && isSessionOngoing(session.status)) ||
+        (selectedStatus === 'scheduled' && session.status === 'scheduled') ||
+        (selectedStatus === 'completed' && session.status === 'completed') ||
+        (selectedStatus === 'cancelled' && session.status === 'cancelled');
+
+      return matchesSearch && matchesStatus;
+    });
+  }, [backendSessions, searchTerm, selectedStatus]);
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'scheduled':
         return 'bg-blue-100 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300';
+      case 'ongoing':
       case 'in_progress':
         return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300';
       case 'completed':
@@ -555,6 +792,28 @@ export const SessionsList: React.FC = () => {
           transition={{ delay: 0.3, duration: 0.6 }}
           className="glass-card rounded-2xl p-6"
         >
+          <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="relative flex-1">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-400" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search sessions by learner or status..."
+                className="w-full rounded-xl border border-slate-200/60 dark:border-slate-800/60 bg-white/80 dark:bg-slate-900/70 pl-12 pr-4 py-3 text-sm text-slate-800 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+            </div>
+            <div className="w-full md:w-auto">
+              <FilterDropdown
+                options={sessionFilterOptions}
+                value={selectedStatus}
+                onChange={setSelectedStatus}
+                placeholder="Filter by status"
+                className="w-full md:w-[220px]"
+              />
+            </div>
+          </div>
+
           {/* Sessions Grid */}
           {backendSessions.length === 0 ? (
             <div className="text-center py-16">
@@ -581,168 +840,221 @@ export const SessionsList: React.FC = () => {
                 Create Session
               </motion.button>
             </div>
+          ) : filteredSessions.length === 0 ? (
+            <div className="text-center py-16">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: 0.4, duration: 0.6 }}
+                className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800/40 dark:to-slate-700/40 mb-6"
+              >
+                <Layers className="h-10 w-10 text-slate-400 dark:text-slate-500" />
+              </motion.div>
+              <h3 className="text-xl font-semibold text-slate-800 dark:text-white mb-3">
+                No sessions match your filters
+              </h3>
+              <p className="text-slate-600 dark:text-slate-400 mb-2 max-w-md mx-auto">
+                Try adjusting your search or selecting a different status.
+              </p>
+              <button
+                onClick={() => {
+                  setSearchTerm('');
+                  setSelectedStatus('all');
+                }}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 dark:border-slate-700 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              >
+                Reset filters
+              </button>
+            </div>
           ) : (
             <div className="grid gap-6">
-          {backendSessions.map((session: Session, index: number) => {
-            const isCompleted = session.status === 'completed';
-            const isCancelled = session.status === 'cancelled';
-            const canModifySchedule = !isCompleted && !isCancelled;
-            const canCancel = !isCancelled && !isCompleted;
-            const isProcessingThisSession = isUpdatingSessionId === session.id;
-            const isOptionsOpen = activeOptionsSessionId === session.id;
+              {filteredSessions.map((session: Session, index: number) => {
+                const isCompleted = session.status === 'completed';
+                const isCancelled = session.status === 'cancelled';
+                const isOngoingStatus = isSessionOngoing(session.status);
+                const canStart = isSessionStartable(session);
+                const canReschedule = session.status === 'scheduled' && !isCancelled;
+                const canCancel = !isCancelled && !isCompleted;
+                const canMarkComplete = isOngoingStatus;
+                const isProcessingThisSession = isUpdatingSessionId === session.id;
+                const isOptionsOpen = activeOptionsSessionId === session.id;
+                const statusLabel = statusDisplayLabel(session.status);
+                const totalActivitiesPlanned = session.total_planned_activities ?? 0;
+                const progressPercent = totalActivitiesPlanned > 0
+                  ? Math.min(100, Math.round((session.completed_activities / totalActivitiesPlanned) * 100))
+                  : 0;
 
-            return (
-              <motion.div
-                key={session.id}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-                className="relative"
-              >
-                <div className="relative overflow-hidden rounded-3xl">
-                  <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-violet-500/15 via-blue-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                  <div className="relative rounded-3xl border border-slate-200/60 dark:border-slate-800/60 bg-white/90 dark:bg-slate-950/80 backdrop-blur-xl p-6 md:p-8 shadow-lg group-hover:shadow-xl transition-all duration-300">
-                    <div className="absolute -top-24 -right-24 h-48 w-48 rounded-full bg-violet-500/10 blur-3xl group-hover:opacity-80 opacity-0 transition-opacity duration-500" />
+                return (
+                  <motion.div
+                    key={session.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    className="relative"
+                  >
+                    <div className="relative overflow-hidden rounded-3xl">
+                      <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-violet-500/15 via-blue-500/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                      <div className="relative rounded-3xl border border-slate-200/60 dark:border-slate-800/60 bg-white/90 dark:bg-slate-950/80 backdrop-blur-xl p-6 md:p-8 shadow-lg group-hover:shadow-xl transition-all duration-300">
+                        <div className="absolute -top-24 -right-24 h-48 w-48 rounded-full bg-violet-500/10 blur-3xl group-hover:opacity-80 opacity-0 transition-opacity duration-500" />
 
-                    <div className="relative z-10 space-y-6">
-                      <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className="relative">
-                            <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-600 to-blue-600 flex items-center justify-center shadow-lg">
-                              <User className="h-7 w-7 text-white" />
-                            </div>
-                            <div className="absolute -bottom-1 -right-1">
-                              <div className={`w-4 h-4 rounded-full border-2 border-white dark:border-slate-900 ${
-                                session.status === 'completed' ? 'bg-green-500' :
-                                session.status === 'in_progress' ? 'bg-yellow-500' :
-                                session.status === 'scheduled' ? 'bg-blue-500' :
-                                'bg-slate-400'
-                              }`} />
-                            </div>
-                          </div>
-                          <div>
-                            <div className="flex flex-wrap items-center gap-3">
-                              <h3 className="text-xl font-semibold text-slate-900 dark:text-white">
-                                {session.student_name || 'Unknown Student'}
-                              </h3>
-                              <span className={`px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide shadow-sm ${getStatusColor(session.status)}`}>
-                                {session.status.replace('_', ' ').toUpperCase()}
-                              </span>
-                            </div>
-                            {session.therapist_name && (
-                              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                                Guided by {session.therapist_name}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-3">
-                          <div className="flex items-center gap-2 rounded-full bg-slate-100/80 dark:bg-slate-800/80 border border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5">
-                            <Calendar className="h-4 w-4 text-violet-600" />
-                            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                              {formatDate(session.session_date)}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2 rounded-full bg-blue-50/80 dark:bg-blue-900/20 border border-blue-200/60 dark:border-blue-800/60 px-3 py-1.5">
-                            <Clock className="h-4 w-4 text-blue-600" />
-                            <span className="text-sm font-medium text-blue-700 dark:text-blue-200">
-                              {formatTime(session.start_time)} – {formatTime(session.end_time)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-slate-50/80 dark:bg-slate-900/60 px-4 py-3">
-                          <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Estimated Duration</p>
-                          <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                            {getSessionDurationMinutes(session)} minutes
-                          </p>
-                          <p className="mt-1 text-xs text-slate-500/70 dark:text-slate-400/70">Automatically calculated</p>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-slate-50/80 dark:bg-slate-900/60 px-4 py-3">
-                          <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Activities</p>
-                          <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                            {session.total_planned_activities} planned
-                          </p>
-                          <p className="mt-1 text-xs text-slate-500/70 dark:text-slate-400/70">{session.completed_activities} completed so far</p>
-                        </div>
-                      </div>
-
-                      {session.therapist_notes && (
-                        <div className="rounded-2xl border border-violet-200/60 dark:border-violet-800/60 bg-gradient-to-r from-violet-500/10 via-violet-500/5 to-transparent px-5 py-4">
-                          <div className="flex items-start gap-3">
-                            <div className="p-2 rounded-xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
-                              <BookOpen className="h-4 w-4" />
-                            </div>
-                            <div>
-                              <p className="text-xs uppercase tracking-wide text-violet-600/80 dark:text-violet-200/70 mb-1 font-medium">Therapist Notes</p>
-                              <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
-                                {session.therapist_notes}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 bg-slate-50/70 dark:bg-slate-900/50 p-4 md:flex-row md:items-center md:justify-between">
-                        <div className="flex flex-wrap items-center gap-4">
-                          {session.total_planned_activities > 0 ? (
-                            <div className="flex items-center gap-3">
-                              <div className="relative h-14 w-14">
-                                <svg className="h-14 w-14 -rotate-90" viewBox="0 0 36 36">
-                                  <path
-                                    className="text-slate-200 dark:text-slate-700"
-                                    strokeWidth="3"
-                                    d="M18 2.0845
-                                       a 15.9155 15.9155 0 0 1 0 31.831
-                                       a 15.9155 15.9155 0 0 1 0 -31.831"
-                                    stroke="currentColor"
-                                    fill="none"
-                                  />
-                                  <path
-                                    className="text-violet-500"
-                                    strokeWidth="3"
-                                    strokeLinecap="round"
-                                    d="M18 2.0845
-                                       a 15.9155 15.9155 0 0 1 0 31.831"
-                                    strokeDasharray={`${Math.min(100, Math.round((session.completed_activities / session.total_planned_activities) * 100))}, 100`}
-                                    stroke="currentColor"
-                                    fill="none"
-                                  />
-                                </svg>
-                                <div className="absolute inset-0 flex items-center justify-center">
-                                  <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                                    {Math.round((session.completed_activities / session.total_planned_activities) * 100)}%
-                                  </span>
+                        <div className="relative z-10 space-y-6">
+                          <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
+                            <div className="flex items-center gap-4">
+                              <div className="relative">
+                                <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-violet-600 to-blue-600 flex items-center justify-center shadow-lg">
+                                  <User className="h-7 w-7 text-white" />
+                                </div>
+                                <div className="absolute -bottom-1 -right-1">
+                                  <div className={`w-4 h-4 rounded-full border-2 border-white dark:border-slate-900 ${
+                                      isCompleted ? 'bg-green-500' :
+                                      isOngoingStatus ? 'bg-yellow-500' :
+                                      session.status === 'scheduled' ? 'bg-blue-500' :
+                                      'bg-slate-400'
+                                  }`} />
                                 </div>
                               </div>
                               <div>
-                                <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Progress</p>
-                                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
-                                  {session.completed_activities}/{session.total_planned_activities} Activities
-                                </p>
+                                <div className="flex flex-wrap items-center gap-3">
+                                  <h3 className="text-xl font-semibold text-slate-900 dark:text-white">
+                                    {session.student_name || 'Unknown Student'}
+                                  </h3>
+                                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold tracking-wide shadow-sm ${getStatusColor(session.status)}`}>
+                                    {statusLabel.toUpperCase()}
+                                  </span>
+                                </div>
+                                {session.therapist_name && (
+                                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                                    Guided by {session.therapist_name}
+                                  </p>
+                                )}
                               </div>
                             </div>
-                          ) : (
-                            <p className="text-sm text-slate-500 dark:text-slate-400">
-                              No activities assigned yet.
-                            </p>
-                          )}
-                        </div>
 
-                        <div className="flex flex-wrap items-center gap-3">
-                          <motion.button
-                            whileHover={{ scale: 1.03 }}
-                            whileTap={{ scale: 0.97 }}
-                            onClick={() => setSelectedSession(session)}
-                            className="flex items-center gap-2 rounded-xl border border-violet-200/70 dark:border-violet-800/60 bg-gradient-to-r from-violet-600/90 to-blue-600/90 px-4 py-2 text-sm font-medium text-white shadow-lg hover:shadow-xl transition-all duration-200"
-                          >
-                            <BookOpen className="h-4 w-4" />
-                            Activities
-                          </motion.button>
-                          <Dropdown
+                            <div className="flex flex-wrap items-center gap-3">
+                              <div className="flex items-center gap-2 rounded-full bg-slate-100/80 dark:bg-slate-800/80 border border-slate-200/60 dark:border-slate-700/60 px-3 py-1.5">
+                                <Calendar className="h-4 w-4 text-violet-600" />
+                                <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                                  {formatDate(session.session_date)}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 rounded-full bg-blue-50/80 dark:bg-blue-900/20 border border-blue-200/60 dark:border-blue-800/60 px-3 py-1.5">
+                                <Clock className="h-4 w-4 text-blue-600" />
+                                <span className="text-sm font-medium text-blue-700 dark:text-blue-200">
+                                  {formatTime(session.start_time)} – {formatTime(session.end_time)}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-slate-50/80 dark:bg-slate-900/60 px-4 py-3">
+                              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Estimated Duration</p>
+                              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                                {getSessionDurationMinutes(session)} minutes
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500/70 dark:text-slate-400/70">Automatically calculated</p>
+                            </div>
+                            <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-slate-50/80 dark:bg-slate-900/60 px-4 py-3">
+                              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1">Activities</p>
+                              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                                {session.total_planned_activities} planned
+                              </p>
+                              <p className="mt-1 text-xs text-slate-500/70 dark:text-slate-400/70">{session.completed_activities} completed so far</p>
+                            </div>
+                          </div>
+
+                          {session.therapist_notes && (
+                            <div className="rounded-2xl border border-violet-200/60 dark:border-violet-800/60 bg-gradient-to-r from-violet-500/10 via-violet-500/5 to-transparent px-5 py-4">
+                              <div className="flex items-start gap-3">
+                                <div className="p-2 rounded-xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
+                                  <BookOpen className="h-4 w-4" />
+                                </div>
+                                <div>
+                                  <p className="text-xs uppercase tracking-wide text-violet-600/80 dark:text-violet-200/70 mb-1 font-medium">Therapist Notes</p>
+                                  <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+                                    {session.therapist_notes}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 bg-slate-50/70 dark:bg-slate-900/50 p-4 md:flex-row md:items-center md:justify-between">
+                            <div className="flex flex-wrap items-center gap-4">
+                              {session.total_planned_activities > 0 ? (
+                                <div className="flex items-center gap-3">
+                                  <div className="relative h-14 w-14">
+                                    <svg className="h-14 w-14 -rotate-90" viewBox="0 0 36 36">
+                                      <path
+                                        className="text-slate-200 dark:text-slate-700"
+                                        strokeWidth="3"
+                                        d="M18 2.0845
+                                           a 15.9155 15.9155 0 0 1 0 31.831
+                                           a 15.9155 15.9155 0 0 1 0 -31.831"
+                                        stroke="currentColor"
+                                        fill="none"
+                                      />
+                                      <path
+                                        className="text-violet-500"
+                                        strokeWidth="3"
+                                        strokeLinecap="round"
+                                        d="M18 2.0845
+                                           a 15.9155 15.9155 0 0 1 0 31.831"
+                                        strokeDasharray={`${progressPercent}, 100`}
+                                        stroke="currentColor"
+                                        fill="none"
+                                      />
+                                    </svg>
+                                    <div className="absolute inset-0 flex items-center justify-center">
+                                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                        {progressPercent}%
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">Progress</p>
+                                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                                        {session.completed_activities}/{totalActivitiesPlanned} Activities
+                                    </p>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="text-sm text-slate-500 dark:text-slate-400">
+                                  No activities assigned yet.
+                                </p>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-3">
+                              <motion.button
+                                whileHover={{ scale: 1.03 }}
+                                whileTap={{ scale: 0.97 }}
+                                onClick={() => setSelectedSession(session)}
+                                className="flex items-center gap-2 rounded-xl border border-violet-200/70 dark:border-violet-800/60 bg-gradient-to-r from-violet-600/90 to-blue-600/90 px-4 py-2 text-sm font-medium text-white shadow-lg hover:shadow-xl transition-all duration-200"
+                              >
+                                <BookOpen className="h-4 w-4" />
+                                Activities
+                              </motion.button>
+                              {canStart && (
+                                <motion.button
+                                  whileHover={{ scale: 1.03 }}
+                                  whileTap={{ scale: 0.97 }}
+                                  disabled={isProcessingThisSession}
+                                  onClick={() => {
+                                    setActiveOptionsSessionId(null);
+                                    void handleStartSession(session);
+                                  }}
+                                  className="flex items-center gap-2 rounded-xl border border-emerald-200/70 dark:border-emerald-800/60 bg-gradient-to-r from-emerald-500/90 to-green-600/90 px-4 py-2 text-sm font-medium text-white shadow-lg hover:shadow-xl transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {isProcessingThisSession ? (
+                                    <RefreshCw className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <PlayCircle className="h-4 w-4" />
+                                  )}
+                                  Start Session
+                                </motion.button>
+                              )}
+                              <Dropdown
                             align="right"
                             side="top"
                             isOpen={isOptionsOpen}
@@ -769,7 +1081,7 @@ export const SessionsList: React.FC = () => {
                               </motion.button>
                             }
                           >
-                            {canModifySchedule && (
+                              {canReschedule && (
                               <DropdownItem
                                 icon={<CalendarClock className="h-4 w-4 text-violet-600 dark:text-violet-200" />}
                                 onClick={() => {
@@ -780,7 +1092,18 @@ export const SessionsList: React.FC = () => {
                                 Reschedule Session
                               </DropdownItem>
                             )}
-                            {canModifySchedule && (
+                              {canStart && (
+                                <DropdownItem
+                                  icon={<PlayCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />}
+                                  onClick={() => {
+                                    setActiveOptionsSessionId(null);
+                                    void handleStartSession(session);
+                                  }}
+                                >
+                                  Start Session
+                                </DropdownItem>
+                              )}
+                              {canMarkComplete && (
                               <DropdownItem
                                 icon={<CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />}
                                 onClick={() => {
@@ -791,7 +1114,7 @@ export const SessionsList: React.FC = () => {
                                 Mark as Completed
                               </DropdownItem>
                             )}
-                            {(canModifySchedule || canCancel) && (
+                              {(canReschedule || canStart || canMarkComplete || canCancel) && (
                               <DropdownSeparator />
                             )}
                             <DropdownItem
@@ -834,10 +1157,10 @@ export const SessionsList: React.FC = () => {
                   </div>
                 </div>
               </motion.div>
-            );
-          })}
-        </div>
-      )}
+                );
+              })}
+            </div>
+          )}
         </motion.div>
 
       {/* Create Session Modal */}
@@ -852,6 +1175,7 @@ export const SessionsList: React.FC = () => {
             onAdd={handleSessionAdd}
             students={selectedLearnerType === 'temporary' ? tempStudents : myStudents}
             allSessions={backendSessions}
+            learnerType={selectedLearnerType || 'general'}
           />
         )}
       </AnimatePresence>
@@ -884,6 +1208,15 @@ export const SessionsList: React.FC = () => {
         onClose={() => setRescheduleTarget(null)}
         onConfirm={handleRescheduleSubmit}
         isSubmitting={Boolean(rescheduleTarget && isUpdatingSessionId === rescheduleTarget.id)}
+      />
+      <SessionRescheduleStepperModal
+        open={showRescheduleStepper}
+        detail={rescheduleValidationDetail}
+        onClose={closeRescheduleFlow}
+        onManualReschedule={handleManualRescheduleSelect}
+        onManualRescheduleSession={handleManualRescheduleFromCascade}
+        onCascadeConfirm={handleCascadeRescheduleConfirm}
+        isCascadeSubmitting={isCascadeSubmitting}
       />
       </div>
     </div>

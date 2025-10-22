@@ -1,11 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Users, Calendar as CalendarIcon, BookOpen, CheckCircle, AlertTriangle, Info } from 'lucide-react';
 import Stepper, { Step } from '../ui/Stepper';
 import AnalogClock from '../ui/AnalogClock';
 import { getTodayIso } from '../../utils/dateUtils';
 import { checkTimeConflicts, TimeConflict } from '../../utils/sessionScheduling';
+import { ASSESSMENT_TOOL_LABELS, StudentSelectorModal } from './SessionAddModal';
+import { ChildGoal } from '../../types';
 import { useTherapistSettings } from '../../hooks/useTherapistSettings';
+import { resolveLearnerType } from '../../utils/learnerUtils';
 
 export interface TodaySessionAddModalProps {
   open: boolean;
@@ -13,6 +16,8 @@ export interface TodaySessionAddModalProps {
   onAdd: (session: any) => void;
   students: Student[];
   todaysSessions?: BackendSession[];
+  learnerType?: 'general' | 'temporary';
+  allSessions?: BackendSession[];
 }
 
 interface Student {
@@ -20,12 +25,8 @@ interface Student {
   name: string;
   firstName: string;
   lastName: string;
-}
-
-interface Activity {
-  id: number;
-  activity_name: string;
-  activity_description?: string;
+  priorDiagnosis?: boolean;
+  status?: string;
 }
 
 interface BackendSession {
@@ -51,12 +52,12 @@ interface BackendSession {
 interface SessionData {
   learnerId: string;
   date: string;
-  time: string;
-  activities: string[];
-  notes: string;
+  startTime: string;
+  endTime: string;
+  childGoals: number[];
+  assessmentTools: string[];
 }
-
-export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open, onClose, onAdd, students, todaysSessions = [] }) => {
+export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open, onClose, onAdd, students, todaysSessions = [], learnerType = 'general', allSessions = [] }) => {
   const { workingHours, freeHours } = useTherapistSettings();
   // Get today's date in YYYY-MM-DD format
   const today = getTodayIso();
@@ -64,22 +65,61 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
   const [sessionData, setSessionData] = useState<SessionData>({
     learnerId: '',
     date: today, // Pre-filled with today's date
-    time: '',
-    activities: [],
-    notes: ''
+    startTime: '',
+    endTime: '',
+    childGoals: [],
+    assessmentTools: []
   });
-  
-  const [availableActivities, setAvailableActivities] = useState<Activity[]>([]);
+  const [availableChildGoals, setAvailableChildGoals] = useState<ChildGoal[]>([]);
   const [loadingActivities, setLoadingActivities] = useState(false);
   const [showStudentSelector, setShowStudentSelector] = useState(false);
   const [timeConflict, setTimeConflict] = useState<TimeConflict>({ type: 'none', message: '', severity: 'none' });
   const [showConflictDialog, setShowConflictDialog] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [currentStep, setCurrentStep] = useState(1);
+
+  const selectedStudent = useMemo(
+    () => students.find(s => s.id.toString() === sessionData.learnerId) || null,
+    [students, sessionData.learnerId]
+  );
+  const resolvedLearnerType = useMemo(
+    () => resolveLearnerType(selectedStudent, learnerType),
+    [selectedStudent, learnerType]
+  );
+  const isTemporaryFlow = resolvedLearnerType === 'temporary';
+  const hasExistingSessions = useMemo(() => {
+    if (!selectedStudent) {
+      return false;
+    }
+    const relevantSessions = [...todaysSessions, ...allSessions];
+    return relevantSessions.some(session => session.child_id === selectedStudent.id);
+  }, [selectedStudent, todaysSessions, allSessions]);
+  const useAssessmentFlow = isTemporaryFlow && !hasExistingSessions;
+  const priorDiagnosis = Boolean(selectedStudent?.priorDiagnosis);
+  const assessmentToolOptions = useMemo(() => {
+    const baseOptions = [
+      { id: 'isaa', name: 'ISAA', description: 'Indian Scale for Assessment of Autism' },
+      { id: 'indt-adhd', name: 'INDT-ADHD', description: 'Indian Scale for ADHD' }
+    ];
+    if (priorDiagnosis) {
+      return [
+        { id: 'clinical-snapshots', name: 'Clinical Snapshots', description: 'Clinical observation snapshots for learners with prior diagnosis' },
+        ...baseOptions
+      ];
+    }
+    return baseOptions;
+  }, [priorDiagnosis]);
+  const selectedAssessmentToolLabels = useMemo(
+    () => sessionData.assessmentTools.map(toolId => ASSESSMENT_TOOL_LABELS[toolId] || toolId),
+    [sessionData.assessmentTools]
+  );
 
   // Fetch activities when a student is selected
   useEffect(() => {
     const fetchActivities = async () => {
-      if (!sessionData.learnerId) {
-        setAvailableActivities([]);
+      if (!sessionData.learnerId || useAssessmentFlow) {
+        setAvailableChildGoals([]);
+        setLoadingActivities(false);
         return;
       }
 
@@ -94,207 +134,220 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
 
         if (response.ok) {
           const data = await response.json();
-          setAvailableActivities(data);
+          setAvailableChildGoals(data);
         } else {
           console.error('Failed to fetch activities:', response.status);
-          // Fallback to mock activities if API fails
-          setAvailableActivities([
-            { id: 1, activity_name: 'Speech Therapy', activity_description: 'Improve speech and communication skills' },
-            { id: 2, activity_name: 'Occupational Therapy', activity_description: 'Develop daily living skills' },
-            { id: 3, activity_name: 'Behavioral Session', activity_description: 'Address behavioral challenges' },
-            { id: 4, activity_name: 'Social Skills', activity_description: 'Enhance social interaction abilities' },
-            { id: 5, activity_name: 'Sensory Play', activity_description: 'Sensory integration activities' },
-          ]);
+          setAvailableChildGoals([]);
         }
       } catch (error) {
         console.error('Error fetching activities:', error);
-        // Fallback to mock activities
-        setAvailableActivities([
-          { id: 1, activity_name: 'Speech Therapy', activity_description: 'Improve speech and communication skills' },
-          { id: 2, activity_name: 'Occupational Therapy', activity_description: 'Develop daily living skills' },
-          { id: 3, activity_name: 'Behavioral Session', activity_description: 'Address behavioral challenges' },
-          { id: 4, activity_name: 'Social Skills', activity_description: 'Enhance social interaction abilities' },
-          { id: 5, activity_name: 'Sensory Play', activity_description: 'Sensory integration activities' },
-        ]);
+        setAvailableChildGoals([]);
       } finally {
         setLoadingActivities(false);
       }
     };
 
     fetchActivities();
-  }, [sessionData.learnerId]);
+  }, [sessionData.learnerId, useAssessmentFlow]);
 
   const handleInputChange = (field: keyof SessionData, value: string | string[]) => {
-    // Prevent changing the date - always keep it as today
-    if (field === 'date') return;
-    
-    setSessionData(prev => ({
-      ...prev,
-      [field]: value
-    }));
+    if (field === 'date') {
+      return;
+    }
 
-    // Check for time conflicts when time changes
-    if (field === 'time') {
-      const newData = { ...sessionData, [field]: value };
-      if (newData.time) {
-        const conflict = checkTimeConflicts(today, newData.time as string, workingHours, freeHours, todaysSessions);
-        setTimeConflict(conflict);
+    setFormError(null);
+    setSessionData(prev => {
+      const nextState: SessionData = field === 'learnerId'
+        ? {
+            ...prev,
+            learnerId: value as string,
+            childGoals: [],
+            assessmentTools: [],
+          }
+        : {
+            ...prev,
+            [field]: value,
+          } as SessionData;
+
+      if (field === 'startTime') {
+        if (nextState.startTime) {
+          const conflict = checkTimeConflicts(today, nextState.startTime, workingHours, freeHours, todaysSessions);
+          setTimeConflict(conflict);
+        } else {
+          setTimeConflict({ type: 'none', message: '', severity: 'none' });
+        }
       }
+
+      return nextState;
+    });
+
+    if (field === 'learnerId') {
+      setAvailableChildGoals([]);
     }
   };
 
-  const toggleActivity = (activity: string) => {
+  useEffect(() => {
+    if (!useAssessmentFlow || !priorDiagnosis) return;
+    setSessionData(prev => {
+      if (prev.assessmentTools.includes('clinical-snapshots')) {
+        return prev;
+      }
+      return {
+        ...prev,
+        assessmentTools: [...prev.assessmentTools, 'clinical-snapshots']
+      };
+    });
+  }, [useAssessmentFlow, priorDiagnosis]);
+
+  const toggleChildGoal = (childGoalId: number) => {
+    setFormError(null);
     setSessionData(prev => ({
       ...prev,
-      activities: prev.activities.includes(activity)
-        ? prev.activities.filter(a => a !== activity)
-        : [...prev.activities, activity]
+      childGoals: prev.childGoals.includes(childGoalId)
+        ? prev.childGoals.filter(id => id !== childGoalId)
+        : [...prev.childGoals, childGoalId]
     }));
   };
 
-  const handleConflictConfirm = () => {
-    // User confirmed they want to proceed despite the conflict
+  const toggleAssessmentTool = (toolId: string) => {
+    setSessionData(prev => {
+      const alreadySelected = prev.assessmentTools.includes(toolId);
+      if (alreadySelected && priorDiagnosis && toolId === 'clinical-snapshots') {
+        return prev;
+      }
+      return {
+        ...prev,
+        assessmentTools: alreadySelected
+          ? prev.assessmentTools.filter(id => id !== toolId)
+          : [...prev.assessmentTools, toolId]
+      };
+    });
+    setFormError(null);
+  };
+
+  const resetFormState = () => {
+    setSessionData({
+      learnerId: '',
+      date: today,
+      startTime: '',
+      endTime: '',
+      childGoals: [],
+      assessmentTools: []
+    });
+    setAvailableChildGoals([]);
+    setTimeConflict({ type: 'none', message: '', severity: 'none' });
     setShowConflictDialog(false);
-    const selectedLearner = students.find(s => s.id.toString() === sessionData.learnerId);
-    if (selectedLearner && sessionData.time && sessionData.activities.length > 0) {
-      onAdd({
-        learner: selectedLearner.name,
-        date: today, // Always use today's date
-        time: sessionData.time,
-        activities: sessionData.activities,
-        notes: sessionData.notes,
-      });
-      
-      // Reset form
-      setSessionData({
-        learnerId: '',
-        date: today,
-        time: '',
-        activities: [],
-        notes: ''
-      });
-      setAvailableActivities([]);
-      setTimeConflict({ type: 'none', message: '', severity: 'none' });
-      onClose();
+    setShowStudentSelector(false);
+    setLoadingActivities(false);
+    setFormError(null);
+    setCurrentStep(1);
+  };
+
+  const handleModalClose = () => {
+    resetFormState();
+    onClose();
+  };
+
+  const finalizeSessionCreation = (learner: Student) => {
+    const toolSummary = selectedAssessmentToolLabels.join(', ');
+    const assessmentNote = useAssessmentFlow && toolSummary
+      ? `Assessment tools planned${learner.priorDiagnosis ? ' (prior diagnosis)' : ''}: ${toolSummary}`
+      : '';
+
+    onAdd({
+      learner: learner.name,
+      learnerId: learner.id,
+      date: today,
+      startTime: sessionData.startTime,
+      endTime: sessionData.endTime,
+      childGoals: useAssessmentFlow ? [] : sessionData.childGoals,
+      assessmentTools: useAssessmentFlow ? sessionData.assessmentTools : [],
+      isAssessmentSession: useAssessmentFlow,
+      notes: assessmentNote,
+    });
+
+    handleModalClose();
+  };
+
+  const validateBeforeSubmit = () => {
+    if (!selectedStudent) {
+      setFormError('Please select a student to continue.');
+      setCurrentStep(1);
+      return false;
     }
+
+    if (!sessionData.startTime || !sessionData.endTime) {
+      setFormError('Please choose session start and end times.');
+      setCurrentStep(2);
+      return false;
+    }
+    
+    // Validate end time is after start time
+    if (sessionData.startTime && sessionData.endTime && sessionData.endTime <= sessionData.startTime) {
+      setFormError('End time must be after start time.');
+      setCurrentStep(2);
+      return false;
+    }
+
+    if (useAssessmentFlow) {
+      if (sessionData.assessmentTools.length === 0) {
+        setFormError('Select at least one assessment tool for this session.');
+        setCurrentStep(3);
+        return false;
+      }
+      if (priorDiagnosis && !sessionData.assessmentTools.includes('clinical-snapshots')) {
+        setFormError('Clinical Snapshots are required for learners with a prior diagnosis.');
+        setCurrentStep(3);
+        return false;
+      }
+    } else if (sessionData.childGoals.length === 0) {
+      setFormError('Select at least one activity for this session.');
+      setCurrentStep(3);
+      return false;
+    }
+
+    setFormError(null);
+    return true;
   };
 
   const handleSubmit = () => {
-    // Check for time conflicts before submitting
-    if (sessionData.time) {
-      const conflict = checkTimeConflicts(today, sessionData.time, workingHours, freeHours, todaysSessions);
+    if (!validateBeforeSubmit()) return;
+
+    if (sessionData.startTime) {
+      const conflict = checkTimeConflicts(today, sessionData.startTime, workingHours, freeHours, todaysSessions);
+      setTimeConflict(conflict);
+
       if (conflict.type !== 'none') {
-        setTimeConflict(conflict);
         if (conflict.severity === 'error') {
-          // For errors (session conflicts), don't show dialog - just prevent submission
           return;
-        } else {
-          // For warnings (working hours/free time), show confirmation dialog
-          setShowConflictDialog(true);
-          return; // Don't proceed with submission
         }
+        setShowConflictDialog(true);
+        return;
       }
     }
 
-    const selectedLearner = students.find(s => s.id.toString() === sessionData.learnerId);
-    if (selectedLearner && sessionData.time && sessionData.activities.length > 0) {
-      onAdd({
-        learner: selectedLearner.name,
-        date: today, // Always use today's date
-        time: sessionData.time,
-        activities: sessionData.activities,
-        notes: sessionData.notes,
-      });
-      
-      // Reset form
-      setSessionData({
-        learnerId: '',
-        date: today,
-        time: '',
-        activities: [],
-        notes: ''
-      });
-      setAvailableActivities([]);
-      setTimeConflict({ type: 'none', message: '', severity: 'none' });
-      onClose();
+    if (selectedStudent) {
+      finalizeSessionCreation(selectedStudent);
     }
   };
 
+  const handleConflictConfirm = () => {
+    setShowConflictDialog(false);
+    if (!validateBeforeSubmit()) {
+      return;
+    }
+
+    if (selectedStudent) {
+      finalizeSessionCreation(selectedStudent);
+    }
+  };
+
+  const handleStudentSelect = (learnerId: string) => {
+    handleInputChange('learnerId', learnerId);
+    setShowStudentSelector(false);
+  };
+
   if (!open) return null;
-
-  const selectedStudent = students.find(s => s.id.toString() === sessionData.learnerId);
-
-  // Student Selector Popup Component
-  const StudentSelectorPopup = () => (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[60] p-4"
-      onClick={() => setShowStudentSelector(false)}
-    >
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        transition={{ duration: 0.3 }}
-        className="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full max-h-[80vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 bg-gradient-to-br from-blue-100 to-blue-200 dark:from-blue-900/50 dark:to-blue-800/50 rounded-full flex items-center justify-center">
-                <Users className="h-6 w-6 text-blue-600 dark:text-blue-400" />
-              </div>
-              <div>
-                <h3 className="text-xl font-semibold text-slate-800 dark:text-white">
-                  Select Student
-                </h3>
-                <p className="text-slate-600 dark:text-slate-400">
-                  Choose who this session is for
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => setShowStudentSelector(false)}
-              className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
-            >
-              <X className="h-5 w-5 text-slate-500" />
-            </button>
-          </div>
-
-          <div className="space-y-3">
-            {students.map(student => (
-              <button
-                key={student.id}
-                onClick={() => {
-                  handleInputChange('learnerId', student.id.toString());
-                  setShowStudentSelector(false);
-                }}
-                className={`w-full p-4 rounded-xl transition-all border-2 text-left ${
-                  sessionData.learnerId === student.id.toString()
-                    ? 'border-violet-500 bg-violet-50 dark:bg-violet-900/20'
-                    : 'border-slate-200 dark:border-slate-700 hover:border-violet-300 dark:hover:border-violet-600 bg-white dark:bg-slate-800'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold ${
-                    sessionData.learnerId === student.id.toString()
-                      ? 'bg-violet-600 text-white'
-                      : 'bg-gradient-to-br from-blue-100 to-purple-100 dark:from-slate-700 dark:to-slate-600 text-blue-700 dark:text-blue-300'
-                  }`}>
-                    {student.name.split(' ').map((n: string) => n[0]).join('')}
-                  </div>
-                  <span className="font-medium text-slate-800 dark:text-white">{student.name}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      </motion.div>
-    </motion.div>
-  );
 
   return (
     <AnimatePresence>
@@ -303,7 +356,7 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-        onClick={onClose}
+  onClick={handleModalClose}
       >
         <motion.div
           initial={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -330,7 +383,7 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                 </div>
               </div>
               <button
-                onClick={onClose}
+                onClick={handleModalClose}
                 className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
               >
                 <X className="h-5 w-5 text-slate-500" />
@@ -342,6 +395,11 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
           <div className="flex-1 overflow-y-auto px-8 pb-8">
             <Stepper
               initialStep={1}
+              currentStep={currentStep}
+              onStepChange={(step) => {
+                setCurrentStep(step);
+                setFormError(null);
+              }}
               onFinalStepCompleted={handleSubmit}
               backButtonText="Previous"
               nextButtonText="Next"
@@ -379,7 +437,11 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                           </div>
                         </div>
                         <button
-                          onClick={() => setShowStudentSelector(true)}
+                          onClick={() => {
+                            if (!showStudentSelector) {
+                              setShowStudentSelector(true);
+                            }
+                          }}
                           className="px-4 py-2 text-violet-600 dark:text-violet-400 hover:bg-violet-100 dark:hover:bg-violet-900/20 rounded-lg transition-colors font-medium"
                         >
                           Change
@@ -389,7 +451,11 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                   ) : (
                     <div className="text-center">
                       <button
-                        onClick={() => setShowStudentSelector(true)}
+                        onClick={() => {
+                          if (!showStudentSelector) {
+                            setShowStudentSelector(true);
+                          }
+                        }}
                         className="w-full p-6 border-2 border-dashed border-slate-300 dark:border-slate-600 rounded-xl hover:border-violet-400 dark:hover:border-violet-500 transition-colors group"
                       >
                         <Users className="h-12 w-12 text-slate-400 group-hover:text-violet-500 mx-auto mb-3" />
@@ -397,6 +463,12 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                           Click to select a student
                         </p>
                       </button>
+                    </div>
+                  )}
+
+                  {formError && currentStep === 1 && (
+                    <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                      {formError}
                     </div>
                   )}
                 </div>
@@ -435,17 +507,33 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                     </p>
                   </div>
 
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-4 text-center">
-                      Session Time
-                    </label>
-                    <div className="flex justify-center">
-                      <AnalogClock
-                        value={sessionData.time}
-                        onChange={(time) => handleInputChange('time', time)}
-                        size={260}
-                        className="max-w-fit"
-                      />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-4 text-center">
+                        Start Time
+                      </label>
+                      <div className="flex justify-center">
+                        <AnalogClock
+                          value={sessionData.startTime}
+                          onChange={(time) => handleInputChange('startTime', time)}
+                          size={220}
+                          className="max-w-fit"
+                        />
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-4 text-center">
+                        End Time
+                      </label>
+                      <div className="flex justify-center">
+                        <AnalogClock
+                          value={sessionData.endTime}
+                          onChange={(time) => handleInputChange('endTime', time)}
+                          size={220}
+                          className="max-w-fit"
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -507,114 +595,197 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                       </div>
                     </motion.div>
                   )}
+
+                  {formError && currentStep === 2 && (
+                    <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                      {formError}
+                    </div>
+                  )}
                 </div>
               </Step>
 
-              {/* Step 3: Choose Activities */}
+              {/* Step 3: Plan Session Focus */}
+              <Step>
+                <div className="space-y-6">
+                  {useAssessmentFlow ? (
+                    <>
+                      <div className="text-center mb-6">
+                        <div className="w-16 h-16 bg-gradient-to-br from-purple-100 to-purple-200 dark:from-purple-900/50 dark:to-purple-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <BookOpen className="h-8 w-8 text-purple-600 dark:text-purple-400" />
+                        </div>
+                        <h3 className="text-xl font-semibold text-slate-800 dark:text-white mb-2">
+                          Select Assessment Tools
+                        </h3>
+                        <p className="text-slate-600 dark:text-slate-400">
+                          Temporary enrollments start with an assessment session. Choose the tools you plan to administer today.
+                        </p>
+                        {priorDiagnosis && (
+                          <p className="text-sm text-amber-700 dark:text-amber-300 mt-2">
+                            Clinical Snapshots are required for learners with a prior diagnosis.
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-3">
+                        {assessmentToolOptions.map(option => {
+                          const selected = sessionData.assessmentTools.includes(option.id);
+                          return (
+                            <button
+                              key={option.id}
+                              onClick={() => toggleAssessmentTool(option.id)}
+                              className={`p-4 rounded-xl transition-all border-2 text-left ${
+                                selected
+                                  ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-purple-300 dark:hover:border-purple-600 bg-white dark:bg-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`inline-flex h-8 w-8 items-center justify-center rounded-lg text-sm font-semibold ${
+                                      selected
+                                        ? 'bg-purple-600 text-white'
+                                        : 'bg-gradient-to-br from-purple-100 to-violet-100 dark:from-slate-700 dark:to-slate-600 text-purple-700 dark:text-purple-300'
+                                    }`}>
+                                      {option.name[0]}
+                                    </span>
+                                    <span className="font-medium text-slate-800 dark:text-white">
+                                      {ASSESSMENT_TOOL_LABELS[option.id] || option.name}
+                                    </span>
+                                    {option.id === 'clinical-snapshots' && priorDiagnosis && (
+                                      <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                                        Required
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+                                    {option.description}
+                                  </p>
+                                </div>
+                                {selected && <CheckCircle className="h-5 w-5 text-purple-600 dark:text-purple-400" />}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {sessionData.assessmentTools.length > 0 && (
+                        <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-xl p-4">
+                          <p className="text-sm text-purple-700 dark:text-purple-300 font-medium">
+                            {sessionData.assessmentTools.length} tool{sessionData.assessmentTools.length === 1 ? '' : 's'} selected
+                          </p>
+                        </div>
+                      )}
+
+                      {formError && currentStep === 3 && (
+                        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                          {formError}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-center mb-6">
+                        <div className="w-16 h-16 bg-gradient-to-br from-green-100 to-green-200 dark:from-green-900/50 dark:to-green-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <BookOpen className="h-8 w-8 text-green-600 dark:text-green-400" />
+                        </div>
+                        <h3 className="text-xl font-semibold text-slate-800 dark:text-white mb-2">
+                          Choose Activities
+                        </h3>
+                        <p className="text-slate-600 dark:text-slate-400">
+                          Select the therapy activities for this session
+                        </p>
+                      </div>
+
+                      {loadingActivities ? (
+                        <div className="flex items-center justify-center py-8">
+                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600"></div>
+                          <span className="ml-3 text-slate-600 dark:text-slate-400">Loading activities...</span>
+                        </div>
+                      ) : !sessionData.learnerId ? (
+                        <div className="text-center py-8">
+                          <Users className="h-12 w-12 text-slate-400 mx-auto mb-4" />
+                          <p className="text-slate-500 dark:text-slate-400">Please select a student first to see available activities.</p>
+                        </div>
+                      ) : availableChildGoals.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-3">
+                          {availableChildGoals.map(childGoal => (
+                            <button
+                              key={childGoal.id}
+                              onClick={() => toggleChildGoal(childGoal.id)}
+                              className={`p-4 rounded-xl transition-all border-2 text-left ${
+                                sessionData.childGoals.includes(childGoal.id)
+                                  ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                                  : 'border-slate-200 dark:border-slate-700 hover:border-green-300 dark:hover:border-green-600 bg-white dark:bg-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                                    sessionData.childGoals.includes(childGoal.id)
+                                      ? 'bg-green-600 text-white'
+                                      : 'bg-gradient-to-br from-green-100 to-emerald-100 dark:from-slate-700 dark:to-slate-600 text-green-700 dark:text-green-300'
+                                  }`}>
+                                    <BookOpen className="h-4 w-4" />
+                                  </div>
+                                  <div>
+                                    <span className="font-medium text-slate-800 dark:text-white block">
+                                      {childGoal.activity_name || 'Unknown Activity'}
+                                    </span>
+                                    {childGoal.activity_description && (
+                                      <span className="text-sm text-slate-500 dark:text-slate-400">
+                                        {childGoal.activity_description}
+                                      </span>
+                                    )}
+                                    <div className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                                      Target: {childGoal.target_frequency ? `${childGoal.target_frequency}x per week` : 'Not set'}
+                                    </div>
+                                  </div>
+                                </div>
+                                {sessionData.childGoals.includes(childGoal.id) && (
+                                  <CheckCircle className="h-5 w-5 text-green-600 dark:text-green-400" />
+                                )}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-center py-8">
+                          <BookOpen className="h-12 w-12 text-slate-400 mx-auto mb-4" />
+                          <p className="text-slate-500 dark:text-slate-400">No activities assigned to this student.</p>
+                        </div>
+                      )}
+
+                      {sessionData.childGoals.length > 0 && (
+                        <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4">
+                          <p className="text-sm text-green-700 dark:text-green-300 font-medium">
+                            {sessionData.childGoals.length} activit{sessionData.childGoals.length === 1 ? 'y' : 'ies'} selected
+                          </p>
+                        </div>
+                      )}
+
+                      {formError && currentStep === 3 && (
+                        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                          {formError}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </Step>
+
+              {/* Step 4: Review Session */}
               <Step>
                 <div className="space-y-6">
                   <div className="text-center mb-6">
                     <div className="w-16 h-16 bg-gradient-to-br from-green-100 to-green-200 dark:from-green-900/50 dark:to-green-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <BookOpen className="h-8 w-8 text-green-600 dark:text-green-400" />
+                      <CheckCircle className="h-8 w-8 text-green-600 dark:text-green-400" />
                     </div>
                     <h3 className="text-xl font-semibold text-slate-800 dark:text-white mb-2">
-                      Choose Activities
+                      Review & Confirm
                     </h3>
                     <p className="text-slate-600 dark:text-slate-400">
-                      Select the therapy activities for this session
-                    </p>
-                  </div>
-
-                  {loadingActivities ? (
-                    <div className="flex items-center justify-center py-8">
-                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600"></div>
-                      <span className="ml-3 text-slate-600 dark:text-slate-400">Loading activities...</span>
-                    </div>
-                  ) : availableActivities.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3">
-                      {availableActivities.map(activity => (
-                        <button
-                          key={activity.id}
-                          onClick={() => toggleActivity(activity.activity_name)}
-                          className={`p-4 rounded-xl transition-all border-2 text-left ${
-                            sessionData.activities.includes(activity.activity_name)
-                              ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
-                              : 'border-slate-200 dark:border-slate-700 hover:border-green-300 dark:hover:border-green-600 bg-white dark:bg-slate-800'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                                sessionData.activities.includes(activity.activity_name)
-                                  ? 'bg-green-600 text-white'
-                                  : 'bg-gradient-to-br from-green-100 to-emerald-100 dark:from-slate-700 dark:to-slate-600 text-green-700 dark:text-green-300'
-                              }`}>
-                                <BookOpen className="h-4 w-4" />
-                              </div>
-                              <div>
-                                <span className="font-medium text-slate-800 dark:text-white block">{activity.activity_name}</span>
-                                {activity.activity_description && (
-                                  <span className="text-sm text-slate-500 dark:text-slate-400">{activity.activity_description}</span>
-                                )}
-                              </div>
-                            </div>
-                            {sessionData.activities.includes(activity.activity_name) && (
-                              <CheckCircle className="h-5 w-5 text-green-600 dark:text-green-400" />
-                            )}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  ) : sessionData.learnerId ? (
-                    <div className="text-center py-8">
-                      <BookOpen className="h-12 w-12 text-slate-400 mx-auto mb-4" />
-                      <p className="text-slate-500 dark:text-slate-400">No activities found for this student.</p>
-                    </div>
-                  ) : (
-                    <div className="text-center py-8">
-                      <Users className="h-12 w-12 text-slate-400 mx-auto mb-4" />
-                      <p className="text-slate-500 dark:text-slate-400">Please select a student first to see available activities.</p>
-                    </div>
-                  )}
-
-                  {sessionData.activities.length > 0 && (
-                    <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4">
-                      <p className="text-sm text-green-700 dark:text-green-300 font-medium">
-                        {sessionData.activities.length} activit{sessionData.activities.length === 1 ? 'y' : 'ies'} selected
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </Step>
-
-              {/* Step 4: Add Notes */}
-              <Step>
-                <div className="space-y-6">
-                  <div className="text-center mb-6">
-                    <div className="w-16 h-16 bg-gradient-to-br from-purple-100 to-purple-200 dark:from-purple-900/50 dark:to-purple-800/50 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <BookOpen className="h-8 w-8 text-purple-600 dark:text-purple-400" />
-                    </div>
-                    <h3 className="text-xl font-semibold text-slate-800 dark:text-white mb-2">
-                      Session Notes
-                    </h3>
-                    <p className="text-slate-600 dark:text-slate-400">
-                      Add any additional notes or instructions for this session
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                      Therapist Notes (Optional)
-                    </label>
-                    <textarea
-                      value={sessionData.notes}
-                      onChange={(e) => handleInputChange('notes', e.target.value)}
-                      rows={6}
-                      className="w-full px-4 py-3 bg-white/50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all text-slate-800 dark:text-white resize-none"
-                      placeholder="Add any notes about this session, special instructions, goals, or observations..."
-                    />
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-                      These notes will be saved with the session and can help guide the therapy activities.
+                      Review your session details before scheduling
                     </p>
                   </div>
 
@@ -635,23 +806,30 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-600 dark:text-slate-400">Time:</span>
+                        <span className="text-slate-600 dark:text-slate-400">Start Time:</span>
                         <span className="font-medium text-slate-800 dark:text-white">
-                          {sessionData.time || 'Not selected'}
+                          {sessionData.startTime || 'Not selected'}
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-600 dark:text-slate-400">Activities:</span>
+                        <span className="text-slate-600 dark:text-slate-400">End Time:</span>
                         <span className="font-medium text-slate-800 dark:text-white">
-                          {sessionData.activities.length} selected
+                          {sessionData.endTime || 'Not selected'}
                         </span>
                       </div>
-                      {sessionData.notes && (
+                      <div className="flex justify-between">
+                        <span className="text-slate-600 dark:text-slate-400">Session Focus:</span>
+                        <span className="font-medium text-slate-800 dark:text-white">
+                          {useAssessmentFlow ? 'Assessment session' : `${sessionData.childGoals.length} activit${sessionData.childGoals.length === 1 ? 'y' : 'ies'} selected`}
+                        </span>
+                      </div>
+                      {useAssessmentFlow && (
                         <div className="pt-2 border-t border-slate-200 dark:border-slate-600">
-                          <span className="text-slate-600 dark:text-slate-400 block mb-1">Notes:</span>
+                          <span className="text-slate-600 dark:text-slate-400 block mb-1">Assessment Tools:</span>
                           <span className="text-slate-800 dark:text-white text-xs">
-                            {sessionData.notes.substring(0, 100)}
-                            {sessionData.notes.length > 100 ? '...' : ''}
+                            {selectedAssessmentToolLabels.length > 0
+                              ? selectedAssessmentToolLabels.join(', ')
+                              : 'No tools selected'}
                           </span>
                         </div>
                       )}
@@ -737,10 +915,13 @@ export const TodaySessionAddModal: React.FC<TodaySessionAddModalProps> = ({ open
         )}
       </AnimatePresence>
       
-      {/* Student Selector Popup */}
-      <AnimatePresence>
-        {showStudentSelector && <StudentSelectorPopup />}
-      </AnimatePresence>
+      <StudentSelectorModal
+        isOpen={showStudentSelector}
+        students={students}
+        selectedLearnerId={sessionData.learnerId}
+        onSelect={handleStudentSelect}
+        onClose={() => setShowStudentSelector(false)}
+      />
     </AnimatePresence>
   );
 };

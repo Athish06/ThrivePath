@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DataProvider } from './context/DataContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -24,6 +24,14 @@ import AssessmentTools from './components/therapist/AssessmentTools';
 import Settings from './components/therapist/Settings';
 import { ActivitiesPage } from './components/therapist/ActivitiesPage';
 import { ChildDetailsPage } from './components/therapist/ChildDetailsPage';
+import ActiveSessions from './components/sessions/ActiveSessions';
+import ProgressAnalysisDetail from './components/therapist/ReportsDocumentation';
+import ProgressAnalysisLanding from './components/therapist/ProgressAnalysisLanding';
+
+const ReportsLegacyRedirect: React.FC = () => {
+  const { learnerId } = useParams();
+  return <Navigate to={learnerId ? `/progress-analysis/${learnerId}` : '/progress-analysis'} replace />;
+};
 
 const DashboardLayout: React.FC = () => {
   const { user } = useAuth();
@@ -101,6 +109,14 @@ const DashboardLayout: React.FC = () => {
             }
           />
           <Route
+            path="/sessions/active"
+            element={
+              <ProtectedRoute requiredRole="therapist">
+                <ActiveSessions />
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/activities"
             element={
               <ProtectedRoute requiredRole="therapist">
@@ -108,6 +124,24 @@ const DashboardLayout: React.FC = () => {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/progress-analysis"
+            element={
+              <ProtectedRoute requiredRole="therapist">
+                <ProgressAnalysisLanding />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/progress-analysis/:learnerId"
+            element={
+              <ProtectedRoute requiredRole="therapist">
+                <ProgressAnalysisDetail />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="/reports" element={<ReportsLegacyRedirect />} />
+          <Route path="/reports/:learnerId" element={<ReportsLegacyRedirect />} />
           <Route
             path="/activities/:learnerId"
             element={

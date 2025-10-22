@@ -147,7 +147,7 @@ async def _create_parent_profile(client, user_id: int, profile_data: Dict[str, A
         logger.error(f"Failed to create parent profile for user {user_id}: {e}")
         return None
 
-def create_user(email: str, password: str, role: str, first_name: str = None, last_name: str = None, 
+async def create_user(email: str, password: str, role: str, first_name: str = None, last_name: str = None, 
                 phone: str = None, address: str = None, emergency_contact: str = None) -> Dict[str, Any]:
     """
     Create a new user account with associated profile
@@ -185,7 +185,7 @@ def create_user(email: str, password: str, role: str, first_name: str = None, la
         
         # Create user account
         client = get_supabase_client()
-        user = _create_user_record(client, user_data)
+        user = await _create_user_record(client, user_data)
         user_id = user["id"]
         
         logger.info(f"Created user with ID: {user_id}, email: {email}, role: {role}")
@@ -194,10 +194,10 @@ def create_user(email: str, password: str, role: str, first_name: str = None, la
         profile = None
         if role == "therapist":
             profile_data = _prepare_therapist_profile_data(user_id, email, first_name, last_name, phone)
-            profile = _create_therapist_profile(client, user_id, profile_data)
+            profile = await _create_therapist_profile(client, user_id, profile_data)
         elif role == "parent":
             profile_data = _prepare_parent_profile_data(user_id, email, first_name, last_name, phone, address, emergency_contact)
-            profile = _create_parent_profile(client, user_id, profile_data)
+            profile = await _create_parent_profile(client, user_id, profile_data)
         
         # Add profile to user data if created successfully
         if profile:

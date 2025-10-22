@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from db import get_supabase_client, format_supabase_response, handle_supabase_error
 
 # ==================== CONFIGURATION & SETUP ====================
@@ -56,6 +56,57 @@ def _get_default_goals() -> List[str]:
         'Develop social interaction',
         'Enhance cognitive abilities'
     ]
+
+def _sanitize_assessment_details(raw_details: Any) -> Tuple[Dict[str, Any], bool, bool]:
+    """Validate and normalize assessment entries for storage and rule checks."""
+    clean_details: Dict[str, Any] = {}
+    has_clinical_snapshot = False
+    has_non_snapshot = False
+
+    if not isinstance(raw_details, dict):
+        return clean_details, has_clinical_snapshot, has_non_snapshot
+
+    for tool_id, detail in raw_details.items():
+        if not isinstance(tool_id, str) or not isinstance(detail, dict):
+            continue
+
+        items = detail.get('items')
+        if not isinstance(items, dict):
+            continue
+
+        valid_items: Dict[str, Any] = {}
+        for item_key, score in items.items():
+            if isinstance(score, (int, float)):
+                valid_items[item_key] = score
+            elif isinstance(score, str):
+                try:
+                    parsed_score = float(score)
+                    valid_items[item_key] = int(parsed_score) if parsed_score.is_integer() else parsed_score
+                except ValueError:
+                    continue
+
+        if not valid_items:
+            continue
+
+        clean_entry: Dict[str, Any] = {'items': valid_items}
+        average_score = detail.get('average')
+        if isinstance(average_score, (int, float)):
+            clean_entry['average'] = average_score
+        elif isinstance(average_score, str):
+            try:
+                parsed_average = float(average_score)
+                clean_entry['average'] = int(parsed_average) if parsed_average.is_integer() else parsed_average
+            except ValueError:
+                pass
+
+        clean_details[tool_id] = clean_entry
+
+        if tool_id == 'clinical-snapshots':
+            has_clinical_snapshot = True
+        else:
+            has_non_snapshot = True
+
+    return clean_details, has_clinical_snapshot, has_non_snapshot
 
 def _transform_student_data(student: Dict[str, Any], include_therapist_name: bool = True) -> Dict[str, Any]:
     """
@@ -277,24 +328,30 @@ def get_students_by_therapist(therapist_id: int) -> List[Dict[str, Any]]:
 
 def get_temp_students_by_therapist(therapist_id: int) -> List[Dict[str, Any]]:
     """
-    Retrieve temporary students with prior diagnosis assigned to a therapist
+    Retrieve students awaiting assessment completion assigned to a therapist
     
     Args:
         therapist_id: ID of the therapist whose temporary students to retrieve
     
     Returns:
-        List of temporary student dictionaries with existing diagnoses
+        List of temporary student dictionaries pending assessment scores
     
     Usage:
-        - Special category for students with pre-existing diagnoses
-        - Used for streamlined enrollment and assessment workflows
-        - Enables fast-track therapy initiation for diagnosed students
-        - Supports different treatment pathways based on diagnosis status
+        - Dedicated lane for enrollments missing assessments or documentation
+        - Supports therapist follow-up on outstanding evaluation tasks
+        - Keeps in-progress learners separate from fully active caseloads
     """
     try:
         client = get_supabase_client()
         
-        response = client.table('children').select(_get_student_base_query()).eq('primary_therapist_id', therapist_id).eq('prior_diagnosis', True).execute()
+        response = (
+            client
+            .table('children')
+            .select(_get_student_base_query())
+            .eq('primary_therapist_id', therapist_id)
+            .eq('status', 'assessment_due')
+            .order('enrollment_date', desc=True)
+        ).execute()
         
         handle_supabase_error(response)
         students = format_supabase_response(response)
@@ -363,7 +420,7 @@ def enroll_student(student_data: Dict[str, Any]) -> Dict[str, Any]:
             'date_of_birth': student_data['dateOfBirth'],
             'enrollment_date': datetime.now().date().isoformat(),
             'diagnosis': student_data.get('diagnosis'),
-            'status': 'active',
+            'status': student_data.get('status', 'active'),
             'primary_therapist_id': student_data['therapistId'],
             'medical_diagnosis': student_data.get('medicalDiagnosis'),
             'drive_url': student_data.get('driveUrl'),
@@ -395,6 +452,83 @@ def enroll_student(student_data: Dict[str, Any]) -> Dict[str, Any]:
         
     except Exception as e:
         _handle_student_query_error("enroll", "new student", e)
+
+def update_student_assessment(student_id: int, therapist_id: int, assessment_updates: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Update assessment details and promote learner status when rules are satisfied."""
+    try:
+        client = get_supabase_client()
+
+        response = (
+            client
+            .table('children')
+            .select(_get_student_base_query())
+            .eq('id', student_id)
+            .execute()
+        )
+
+        handle_supabase_error(response)
+        students = format_supabase_response(response)
+
+        if not students:
+            raise ValueError("Student not found")
+
+        student_record = students[0]
+
+        if student_record.get('primary_therapist_id') != therapist_id:
+            raise PermissionError("You do not have permission to update this learner.")
+
+        existing_clean, _, _ = _sanitize_assessment_details(student_record.get('assessment_details'))
+        incoming_payload = assessment_updates if isinstance(assessment_updates, dict) else {}
+        incoming_clean, _, _ = _sanitize_assessment_details(incoming_payload)
+
+        combined_details = existing_clean.copy()
+
+        for tool_id, detail in incoming_payload.items():
+            if detail is None:
+                combined_details.pop(tool_id, None)
+                continue
+
+            if tool_id in incoming_clean:
+                combined_details[tool_id] = incoming_clean[tool_id]
+            elif isinstance(detail, dict):
+                items = detail.get('items')
+                if isinstance(items, dict) and not any(isinstance(score, (int, float, str)) for score in items.values()):
+                    combined_details.pop(tool_id, None)
+
+        final_clean, has_clinical_snapshot, has_non_snapshot = _sanitize_assessment_details(combined_details)
+
+        prior_diagnosis = bool(student_record.get('prior_diagnosis'))
+        meets_requirement = bool(final_clean) and (
+            has_clinical_snapshot if prior_diagnosis else (has_clinical_snapshot or has_non_snapshot)
+        )
+
+        new_status = 'active' if meets_requirement else 'assessment_due'
+
+        update_payload = {
+            'assessment_details': final_clean or None,
+            'status': new_status
+        }
+
+        update_response = client.table('children').update(update_payload).eq('id', student_id).execute()
+        handle_supabase_error(update_response)
+
+        updated_student = get_student_by_id(student_id)
+        if not updated_student:
+            raise ValueError("Failed to fetch updated student data")
+
+        logger.info(
+            "Updated assessment for student %s by therapist %s; status set to %s",
+            student_id,
+            therapist_id,
+            new_status
+        )
+
+        return updated_student
+
+    except (PermissionError, ValueError):
+        raise
+    except Exception as e:
+        _handle_student_query_error("update assessment for", f"student {student_id}", e)
 
 # ==================== FUTURE ENHANCEMENT FUNCTIONS ====================
 # Placeholder for additional student management functions

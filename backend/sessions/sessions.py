@@ -50,6 +50,13 @@ class SessionUpdate(BaseModel):
     therapist_notes: Optional[str] = None
     parent_feedback: Optional[str] = None
 
+class SessionComplete(BaseModel):
+    """
+    Data model for completing a therapy session
+    - Includes therapist notes to be added when session is marked as completed
+    """
+    therapist_notes: Optional[str] = None
+
 class SessionResponse(BaseModel):
     """
     Complete session data model for API responses
@@ -109,6 +116,11 @@ class SessionActivityResponse(BaseModel):
     performance_notes: Optional[str]
     created_at: datetime
     updated_at: datetime
+    
+    # Related data from child_goals
+    child_id: Optional[int] = None
+    activity_id: Optional[int] = None
+    current_status: Optional[str] = None  # Status from child_goals (in_progress, completed, etc.)
     
     # Related activity data from master activities table
     activity_name: Optional[str] = None
@@ -276,9 +288,47 @@ async def create_session(therapist_id: int, session_data: SessionCreate) -> Sess
         # Create session activities if provided
         if session_data.session_activities:
             for activity_data in session_data.session_activities:
+                child_goal_id = activity_data.get('child_goal_id')
+                
+                # If activity_id is provided instead of child_goal_id, create/get child_goal first
+                if not child_goal_id and activity_data.get('activity_id'):
+                    activity_id = activity_data['activity_id']
+                    child_id = session_data.child_id
+                    
+                    # Check if child_goal already exists for this child and activity
+                    existing_goal = supabase.table('child_goals').select('id').eq(
+                        'child_id', child_id
+                    ).eq('activity_id', activity_id).execute()
+                    
+                    if existing_goal.data:
+                        child_goal_id = existing_goal.data[0]['id']
+                        logger.info(f"Using existing child_goal {child_goal_id} for activity {activity_id}")
+                    else:
+                        # Create new child_goal for assessment activity
+                        child_goal_insert = {
+                            'child_id': child_id,
+                            'activity_id': activity_id,
+                            'current_status': 'in_progress',
+                            'total_attempts': 0,
+                            'successful_attempts': 0,
+                            'created_at': current_time,
+                            'updated_at': current_time
+                        }
+                        goal_result = supabase.table('child_goals').insert(child_goal_insert).execute()
+                        if goal_result.data:
+                            child_goal_id = goal_result.data[0]['id']
+                            logger.info(f"Created new child_goal {child_goal_id} for assessment activity {activity_id}")
+                        else:
+                            logger.warning(f"Failed to create child_goal for activity {activity_id}")
+                            continue
+                
+                if not child_goal_id:
+                    logger.warning(f"No child_goal_id or activity_id provided for session activity")
+                    continue
+                
                 activity_insert = {
                     'session_id': session_id,
-                    'child_goal_id': activity_data['child_goal_id'],
+                    'child_goal_id': child_goal_id,
                     'actual_duration': activity_data.get('actual_duration', 30),
                     'performance_notes': activity_data.get('performance_notes', ''),
                     'created_at': current_time,
@@ -287,7 +337,7 @@ async def create_session(therapist_id: int, session_data: SessionCreate) -> Sess
                 
                 activity_result = supabase.table('session_activities').insert(activity_insert).execute()
                 if not activity_result.data:
-                    logger.warning(f"Failed to create session activity for child_goal_id {activity_data['child_goal_id']}")
+                    logger.warning(f"Failed to create session activity for child_goal_id {child_goal_id}")
         
         # Get related data using helper functions
         student_name = await _get_student_name(session_data_result['child_id'])
@@ -676,7 +726,7 @@ async def add_activity_to_session(session_id: int, therapist_id: int, activity_d
         
         # Get activity details from child_goals and activities tables
         child_goal_result = supabase.table('child_goals').select('''
-            id, child_id, activity_id,
+            id, child_id, activity_id, current_status,
             activities!activity_id (activity_name, activity_description, domain, difficulty_level, estimated_duration)
         ''').eq('id', activity_data_result['child_goal_id']).execute()
         
@@ -685,14 +735,23 @@ async def add_activity_to_session(session_id: int, therapist_id: int, activity_d
         domain = None
         difficulty_level = None
         estimated_duration = None
+        child_id = None
+        activity_id = None
+        current_status = None
         
-        if child_goal_result.data and child_goal_result.data[0].get('activities'):
-            activity = child_goal_result.data[0]['activities']
-            activity_name = activity['activity_name']
-            activity_description = activity['activity_description']
-            domain = activity['domain']
-            difficulty_level = activity['difficulty_level']
-            estimated_duration = activity['estimated_duration']
+        if child_goal_result.data:
+            child_goal = child_goal_result.data[0]
+            child_id = child_goal.get('child_id')
+            activity_id = child_goal.get('activity_id')
+            current_status = child_goal.get('current_status')
+            
+            if child_goal.get('activities'):
+                activity = child_goal['activities']
+                activity_name = activity['activity_name']
+                activity_description = activity['activity_description']
+                domain = activity['domain']
+                difficulty_level = activity['difficulty_level']
+                estimated_duration = activity['estimated_duration']
         
         session_activity = SessionActivityResponse(
             id=activity_data_result['id'],
@@ -702,6 +761,9 @@ async def add_activity_to_session(session_id: int, therapist_id: int, activity_d
             performance_notes=activity_data_result['performance_notes'],
             created_at=activity_data_result['created_at'],
             updated_at=activity_data_result['updated_at'],
+            child_id=child_id,
+            activity_id=activity_id,
+            current_status=current_status,
             activity_name=activity_name,
             activity_description=activity_description,
             domain=domain,
@@ -742,7 +804,7 @@ async def get_session_activities(session_id: int, therapist_id: int) -> List[Ses
         result = supabase.table('session_activities').select('''
             id, session_id, child_goal_id, actual_duration, performance_notes, created_at, updated_at,
             child_goals!child_goal_id (
-                id, child_id, activity_id,
+                id, child_id, activity_id, current_status,
                 activities!activity_id (activity_name, activity_description, domain, difficulty_level, estimated_duration)
             )
         ''').eq('session_id', session_id).order('created_at').execute()
@@ -764,6 +826,9 @@ async def get_session_activities(session_id: int, therapist_id: int) -> List[Ses
                 performance_notes=activity_data['performance_notes'],
                 created_at=activity_data['created_at'],
                 updated_at=activity_data['updated_at'],
+                child_id=child_goal.get('child_id') if child_goal else None,
+                activity_id=child_goal.get('activity_id') if child_goal else None,
+                current_status=child_goal.get('current_status') if child_goal else None,
                 activity_name=activity_info['activity_name'] if activity_info else None,
                 activity_description=activity_info['activity_description'] if activity_info else None,
                 domain=activity_info['domain'] if activity_info else None,
@@ -816,6 +881,72 @@ async def remove_activity_from_session(session_activity_id: int, session_id: int
     except Exception as e:
         logger.error(f"Error removing activity from session: {str(e)}")
         raise Exception(f"Database error: {str(e)}")
+
+
+async def update_session_activity(
+    session_activity_id: int,
+    session_id: int,
+    therapist_id: int,
+    update_data: SessionActivityUpdate
+) -> SessionActivityResponse:
+    """
+    Update a session activity with actual duration and performance notes
+    
+    Args:
+        session_activity_id: ID of the session activity to update
+        session_id: ID of the session containing the activity
+        therapist_id: ID of the therapist making the update
+        update_data: SessionActivityUpdate containing fields to update
+    
+    Returns:
+        Updated SessionActivityResponse object
+    
+    Usage:
+        - Used to record actual activity duration after completion
+        - Enables performance notes capture during active sessions
+        - Provides security through session ownership verification
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Verify session access using helper function
+        if not await _verify_session_access(session_id, therapist_id):
+            raise Exception("Session not found or access denied")
+        
+        # Build update dictionary with only provided fields
+        update_dict = {}
+        if update_data.actual_duration is not None:
+            update_dict['actual_duration'] = update_data.actual_duration
+        if update_data.performance_notes is not None:
+            update_dict['performance_notes'] = update_data.performance_notes
+        
+        if not update_dict:
+            raise ValueError("No fields to update")
+        
+        update_dict['updated_at'] = utc_now_iso()
+        
+        # Update the session activity
+        result = supabase.table('session_activities').update(update_dict).eq(
+            'id', session_activity_id
+        ).eq('session_id', session_id).execute()
+        
+        if not result.data or len(result.data) == 0:
+            raise ValueError(f"Session activity {session_activity_id} not found")
+        
+        # Fetch the updated activity with all related data
+        activities = await get_session_activities(session_id, therapist_id)
+        updated_activity = next((a for a in activities if a.id == session_activity_id), None)
+        
+        if not updated_activity:
+            raise ValueError("Failed to fetch updated activity")
+        
+        logger.info(f"Updated session activity {session_activity_id} in session {session_id}")
+        return updated_activity
+        
+    except Exception as e:
+        logger.error(f"Error updating session activity: {str(e)}")
+        raise Exception(f"Database error: {str(e)}")
+
 
 # ==================== ACTIVITY & GOAL UTILITY FUNCTIONS ====================
 # Helper functions for activity selection and goal management
@@ -921,6 +1052,81 @@ async def get_master_activities() -> List[ActivityResponse]:
         
     except Exception as e:
         logger.error(f"Error getting master activities: {str(e)}")
+        raise Exception(f"Database error: {str(e)}")
+
+async def get_assessment_tool_activities() -> Dict[str, Any]:
+    """
+    Retrieve assessment tool activities grouped by tool type
+    
+    Returns:
+        Dictionary with assessment tools as keys and their activities as values
+        {
+            'isaa': {'id': 9, 'name': 'ISAA', 'activities': [...]},
+            'indt-adhd': {'id': 10, 'name': 'INDT-ADHD', 'activities': [...]},
+            'clinical-snapshots': {'id': 11, 'name': 'Clinical Snapshots', 'activities': [...]}
+        }
+    
+    Usage:
+        - Used for assessment session planning
+        - Powers assessment tool selection and activity assignment
+        - Enables structured assessment workflows for temporary enrollments
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Assessment tool parent activity IDs
+        assessment_tools = {
+            'isaa': {'id': 9, 'name': 'ISAA (Indian Scale for Assessment of Autism)'},
+            'indt-adhd': {'id': 10, 'name': 'INDT-ADHD (Indian Scale for ADHD)'},
+            'clinical-snapshots': {'id': 11, 'name': 'Clinical Snapshots'}
+        }
+        
+        result_data = {}
+        
+        for tool_key, tool_info in assessment_tools.items():
+            # Get the parent activity
+            parent_result = supabase.table('activities').select('*').eq('id', tool_info['id']).execute()
+            
+            if not parent_result.data:
+                logger.warning(f"Assessment tool {tool_key} (ID: {tool_info['id']}) not found in activities table")
+                continue
+            
+            parent_activity = parent_result.data[0]
+            
+            # Get child activities (activities that belong to this assessment tool)
+            # Assuming there's a parent_id field or similar relationship
+            # If not, we'll need to adjust based on actual schema
+            child_result = supabase.table('activities').select('*').eq('parent_id', tool_info['id']).order('activity_name').execute()
+            
+            activities_list = []
+            if child_result.data:
+                for activity_data in child_result.data:
+                    activities_list.append({
+                        'id': activity_data['id'],
+                        'activity_name': activity_data['activity_name'],
+                        'activity_description': activity_data.get('activity_description'),
+                        'domain': activity_data.get('domain'),
+                        'difficulty_level': activity_data.get('difficulty_level'),
+                        'estimated_duration': activity_data.get('estimated_duration')
+                    })
+            
+            result_data[tool_key] = {
+                'id': tool_info['id'],
+                'name': tool_info['name'],
+                'parent_activity': {
+                    'id': parent_activity['id'],
+                    'activity_name': parent_activity['activity_name'],
+                    'activity_description': parent_activity.get('activity_description')
+                },
+                'activities': activities_list,
+                'activity_count': len(activities_list)
+            }
+        
+        logger.info(f"Retrieved assessment tools with activities")
+        return result_data
+        
+    except Exception as e:
+        logger.error(f"Error getting assessment tool activities: {str(e)}")
         raise Exception(f"Database error: {str(e)}")
 
 async def assign_ai_activity_to_child(activity_data: Dict[str, Any], child_id: int, therapist_id: int) -> Dict[str, Any]:
@@ -1096,3 +1302,62 @@ def _map_difficulty_to_level(difficulty: str) -> int:
         return difficulty_mapping.get(difficulty.lower(), 2)
 
     return 2
+
+
+# ==================== ACTIVITY COMPLETION ====================
+
+async def mark_activity_completed(child_id: int, activity_id: int) -> Dict[str, Any]:
+    """
+    Mark a child goal activity as completed
+    Updates the current_status in child_goals table to 'completed'
+    
+    Args:
+        child_id: ID of the child
+        activity_id: ID of the activity
+        
+    Returns:
+        Dict containing success status and message
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Find the child_goal record
+        goal_result = supabase.table('child_goals').select('id, current_status').eq(
+            'child_id', child_id
+        ).eq('activity_id', activity_id).execute()
+        
+        if not goal_result.data or len(goal_result.data) == 0:
+            raise ValueError(f"No goal found for child {child_id} and activity {activity_id}")
+        
+        child_goal_id = goal_result.data[0]['id']
+        current_status = goal_result.data[0]['current_status']
+        
+        # Update the status to completed
+        update_result = supabase.table('child_goals').update({
+            'current_status': 'completed',
+            'date_mastered': date.today().isoformat(),
+            'updated_at': utc_now_iso()
+        }).eq('id', child_goal_id).execute()
+        
+        if not update_result.data:
+            raise ValueError("Failed to update goal status")
+        
+        logger.info(f"Marked activity {activity_id} as completed for child {child_id}")
+        
+        return {
+            'success': True,
+            'message': 'Activity marked as completed',
+            'child_goal_id': child_goal_id,
+            'previous_status': current_status,
+            'new_status': 'completed'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error marking activity as completed: {str(e)}")
+        return {
+            'success': False,
+            'message': str(e),
+            'child_goal_id': None,
+            'previous_status': None,
+            'new_status': None
+        }

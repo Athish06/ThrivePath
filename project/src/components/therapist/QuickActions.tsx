@@ -194,6 +194,7 @@ export const QuickActions: React.FC<QuickActionsProps> = () => {
           }}
           onAdd={handleSessionAdd}
           students={selectedLearnerType === 'temporary' ? tempStudents : myStudents}
+          learnerType={selectedLearnerType || 'general'}
         />
       )}
     </div>

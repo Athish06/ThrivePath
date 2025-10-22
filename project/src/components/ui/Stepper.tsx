@@ -10,8 +10,16 @@ export const Step: React.FC<StepProps> = ({ children }) => {
   return <div>{children}</div>;
 };
 
+export interface StepperFooterContext {
+  currentStep: number;
+  totalSteps: number;
+  goToNextStep: () => void;
+  goToPreviousStep: () => void;
+  goToStep: (step: number) => void;
+}
+
 interface StepperProps {
-  children: React.ReactElement<StepProps>[];
+  children: React.ReactNode;
   initialStep?: number;
   currentStep?: number; // Add external control
   onStepChange?: (step: number) => void;
@@ -19,6 +27,7 @@ interface StepperProps {
   backButtonText?: string;
   nextButtonText?: string;
   disabled?: boolean; // Add disabled prop
+  renderFooter?: (context: StepperFooterContext) => ReactNode;
 }
 
 const Stepper: React.FC<StepperProps> = ({
@@ -29,10 +38,12 @@ const Stepper: React.FC<StepperProps> = ({
   onFinalStepCompleted,
   backButtonText = "Previous",
   nextButtonText = "Next",
-  disabled = false
+  disabled = false,
+  renderFooter
 }) => {
+  const steps = React.Children.toArray(children) as React.ReactElement<StepProps>[];
   const [currentStep, setCurrentStep] = useState(initialStep);
-  const totalSteps = children.length;
+  const totalSteps = steps.length;
 
   // Sync with external currentStep prop
   useEffect(() => {
@@ -64,6 +75,14 @@ const Stepper: React.FC<StepperProps> = ({
       setCurrentStep(step);
       onStepChange?.(step);
     }
+  };
+
+  const footerContext: StepperFooterContext = {
+    currentStep,
+    totalSteps,
+    goToNextStep,
+    goToPreviousStep,
+    goToStep
   };
 
   return (
@@ -134,38 +153,42 @@ const Stepper: React.FC<StepperProps> = ({
           transition={{ duration: 0.3 }}
           className="mb-12 min-h-[400px]"
         >
-          {children[currentStep - 1]}
+          {steps[currentStep - 1]}
         </motion.div>
       </AnimatePresence>
 
       {/* Navigation Buttons */}
-      <div className="flex justify-between">
-        <motion.button
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          onClick={goToPreviousStep}
-          disabled={currentStep === 1}
-          className="flex items-center gap-2 px-4 py-2 text-slate-600 dark:text-slate-400 disabled:opacity-50 disabled:cursor-not-allowed hover:text-violet-600 dark:hover:text-violet-400 transition-colors"
-        >
-          <ChevronLeft className="w-4 h-4" />
-          {backButtonText}
-        </motion.button>
+      {renderFooter ? (
+        renderFooter(footerContext)
+      ) : (
+        <div className="flex justify-between">
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={goToPreviousStep}
+            disabled={currentStep === 1}
+            className="flex items-center gap-2 px-4 py-2 text-slate-600 dark:text-slate-400 disabled:opacity-50 disabled:cursor-not-allowed hover:text-violet-600 dark:hover:text-violet-400 transition-colors"
+          >
+            <ChevronLeft className="w-4 h-4" />
+            {backButtonText}
+          </motion.button>
 
-        <motion.button
-          whileHover={{ scale: disabled ? 1 : 1.02 }}
-          whileTap={{ scale: disabled ? 1 : 0.98 }}
-          onClick={goToNextStep}
-          disabled={disabled}
-          className={`flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-violet-500 to-blue-500 text-white rounded-xl font-medium transition-all shadow-lg hover:shadow-xl ${
-            disabled 
-              ? 'opacity-50 cursor-not-allowed hover:from-violet-500 hover:to-blue-500 hover:shadow-lg' 
-              : 'hover:from-violet-600 hover:to-blue-600'
-          }`}
-        >
-          {currentStep === totalSteps ? 'Complete' : nextButtonText}
-          <ChevronRight className="w-4 h-4" />
-        </motion.button>
-      </div>
+          <motion.button
+            whileHover={{ scale: disabled ? 1 : 1.02 }}
+            whileTap={{ scale: disabled ? 1 : 0.98 }}
+            onClick={goToNextStep}
+            disabled={disabled}
+            className={`flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-violet-500 to-blue-500 text-white rounded-xl font-medium transition-all shadow-lg hover:shadow-xl ${
+              disabled 
+                ? 'opacity-50 cursor-not-allowed hover:from-violet-500 hover:to-blue-500 hover:shadow-lg' 
+                : 'hover:from-violet-600 hover:to-blue-600'
+            }`}
+          >
+            {currentStep === totalSteps ? 'Complete' : nextButtonText}
+            <ChevronRight className="w-4 h-4" />
+          </motion.button>
+        </div>
+      )}
     </div>
   );
 };

@@ -35,7 +35,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     try {
       const token = localStorage.getItem('access_token');
       if (!token) {
-        throw new Error('No access token found');
+        console.warn('No access token found for profile fetch');
+        return;
       }
 
       const response = await fetch('http://localhost:8000/api/me', {
@@ -47,33 +48,36 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to fetch profile');
+        console.error('Profile fetch failed with status:', response.status);
+        return;
       }
 
       const profileData = await response.json();
       
-      // Update user with profile information
-      if (user) {
+      // Update user with profile information using functional state update
+      setUser((currentUser) => {
+        if (!currentUser) return currentUser;
+        
         const updatedUser: User = {
-          ...user,
-          name: profileData.name || profileData.email, // Use name from /api/me response
-          // Add other profile fields as needed
+          ...currentUser,
+          name: profileData.name || profileData.email,
         };
         
-        setUser(updatedUser);
         localStorage.setItem('user_data', JSON.stringify(updatedUser));
-      }
+        return updatedUser;
+      });
     } catch (error) {
       console.error('Failed to fetch user profile:', error);
+      // Don't throw - just log the error and continue
     }
-  }, [user]); // Only depend on user
+  }, []); // Remove user dependency to avoid infinite loops
 
   // Fetch profile data when component mounts if user exists
-  React.useEffect(() => {
+  useEffect(() => {
     if (user && user.name === user.email) {
       fetchUserProfile();
     }
-  }, [user, fetchUserProfile]); // Include all dependencies
+  }, []); // Only run once on mount
 
   const login = async (email: string, password: string) => {
     try {
@@ -127,7 +131,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
             ...frontendUser,
             name: profileData.name || profileData.email, // Use name from /api/me response
           };
-          
+        console.log(updatedUser.name)
           setUser(updatedUser);
           localStorage.setItem('user_data', JSON.stringify(updatedUser));
         }

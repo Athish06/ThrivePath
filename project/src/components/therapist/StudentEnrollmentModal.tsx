@@ -39,7 +39,7 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
   onSuccess
 }) => {
   const { user } = useAuth();
-  const { refreshLearners } = useData();
+  const { refreshLearners, refreshTempStudents } = useData();
   
   // Enhanced close handler to reset state
   const handleClose = () => {
@@ -319,6 +319,9 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
   const [autoFillOccurred, setAutoFillOccurred] = useState(false);
   // Assessment state
   const [currentAssessmentIndex, setCurrentAssessmentIndex] = useState(0);
+  const hasRecordedAssessmentScores = useMemo(() =>
+    Object.values(studentData.assessmentDetails).some(tool => tool && Object.keys(tool).length > 0),
+  [studentData.assessmentDetails]);
 
   // Assessment items data
   const assessmentItems = {
@@ -855,19 +858,43 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
       const age = calculateAge(studentData.dateOfBirth);
       const token = localStorage.getItem('access_token');
       
-      // Calculate averages for each assessment tool
+      // Calculate averages for each assessment tool and determine enrollment status
       const processedAssessmentDetails: { [key: string]: { items: { [key: string]: number }, average: number } } = {};
-      
+      let hasClinicalSnapshotScores = false;
+      let hasNonSnapshotScores = false;
+
       Object.entries(studentData.assessmentDetails).forEach(([toolId, toolData]) => {
-        const scores = Object.values(toolData);
-        const validScores = scores.filter(score => score !== null && score !== undefined);
-        const average = validScores.length > 0 ? validScores.reduce((sum, score) => sum + score, 0) / validScores.length : 0;
-        
+        if (!toolData) return;
+
+        const cleanedItems: { [key: string]: number } = {};
+        Object.entries(toolData).forEach(([itemId, score]) => {
+          if (score !== null && score !== undefined) {
+            cleanedItems[itemId] = score;
+          }
+        });
+
+        const itemScores = Object.values(cleanedItems);
+        if (itemScores.length === 0) {
+          return;
+        }
+
+        if (toolId === 'clinical-snapshots') {
+          hasClinicalSnapshotScores = true;
+        } else {
+          hasNonSnapshotScores = true;
+        }
+
+        const average = itemScores.reduce((sum, score) => sum + score, 0) / itemScores.length;
         processedAssessmentDetails[toolId] = {
-          items: toolData,
-          average: Math.round(average * 100) / 100 // Round to 2 decimal places
+          items: cleanedItems,
+          average: Math.round(average * 100) / 100
         };
       });
+
+      const priorDiagnosis = !!studentData.priorDiagnosis;
+      const enrollmentStatus = priorDiagnosis
+        ? (hasClinicalSnapshotScores || hasNonSnapshotScores ? 'active' : 'assessment_due')
+        : (hasNonSnapshotScores ? 'active' : 'assessment_due');
       
       const response = await fetch('http://localhost:8000/api/enroll-student', {
         method: 'POST',
@@ -892,7 +919,8 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
           uploadedFileName: studentData.originalFileName,
           // Include assessment data with calculated averages
           selectedAssessmentTools: studentData.selectedAssessmentTools,
-          assessmentDetails: processedAssessmentDetails
+          assessmentDetails: Object.keys(processedAssessmentDetails).length > 0 ? processedAssessmentDetails : null,
+          status: enrollmentStatus
         }),
       });
 
@@ -901,7 +929,19 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
       }
 
       await response.json();
-      await refreshLearners(); // Refresh the students list
+      await Promise.all([
+        refreshLearners(),
+        refreshTempStudents()
+      ]);
+      
+      // Track activity for learner enrollment
+      window.dispatchEvent(new CustomEvent('activityAdded', { 
+        detail: { 
+          message: `Enrolled new learner: ${studentData.firstName} ${studentData.lastName}`,
+          type: 'learner'
+        }
+      }));
+      
       onSuccess?.();
       
       handleClose(); // Use enhanced close handler
@@ -2094,7 +2134,14 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
                     {studentData.selectedAssessmentTools.length === 0 && (
                       <div className="p-4 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
                         <p className="text-amber-700 dark:text-amber-300 text-sm">
-                          Please select at least one assessment tool to proceed.
+                          No assessment tools selected. You can finish enrollment now and capture assessments later; the learner will remain in Temporary Enrollment until a clinical snapshot or assessment is recorded.
+                        </p>
+                      </div>
+                    )}
+                    {studentData.priorDiagnosis && studentData.selectedAssessmentTools.length > 0 && !studentData.selectedAssessmentTools.includes('clinical-snapshots') && (
+                      <div className="p-4 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800">
+                        <p className="text-purple-700 dark:text-purple-300 text-sm">
+                          Add a Clinical Snapshot when available so prior-diagnosis enrollments can move out of Temporary status.
                         </p>
                       </div>
                     )}
@@ -2147,7 +2194,7 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
                     {studentData.selectedAssessmentTools.length === 0 && (
                       <div className="p-4 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
                         <p className="text-amber-700 dark:text-amber-300 text-sm">
-                          Please select at least one assessment tool to proceed.
+                          No assessment tools selected. Completing enrollment without assessments keeps the learner in Temporary Enrollment until scores are added.
                         </p>
                       </div>
                     )}
@@ -2170,6 +2217,14 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
                     Score each assessment item individually
                   </p>
                 </div>
+
+                {studentData.selectedAssessmentTools.length > 0 && !hasRecordedAssessmentScores && (
+                  <div className="p-4 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+                    <p className="text-amber-700 dark:text-amber-300 text-sm">
+                      Scores are still pending. Completing enrollment without scores keeps the learner in Temporary Enrollment until assessments are captured.
+                    </p>
+                  </div>
+                )}
 
                 {studentData.selectedAssessmentTools.length > 0 ? (
                   studentData.selectedAssessmentTools.length === 1 ? (
@@ -2402,7 +2457,7 @@ export const StudentEnrollmentModal: React.FC<StudentEnrollmentModalProps> = ({
                     </div>
                     <h4 className="font-semibold text-slate-800 dark:text-white mb-2">No Tools Selected</h4>
                     <p className="text-slate-600 dark:text-slate-400">
-                      Please go back to the previous step and select assessment tools.
+                      You can finish enrollment now; the learner will remain in Temporary Enrollment until assessments are recorded.
                     </p>
                   </div>
                 )}

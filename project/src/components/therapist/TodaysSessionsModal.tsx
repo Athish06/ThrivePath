@@ -67,17 +67,29 @@ export const TodaysSessionsModal: React.FC<TodaysSessionsModalProps> = ({ onClos
               })}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:text-slate-500 dark:hover:bg-slate-900 dark:hover:text-slate-300"
-            aria-label="Close today's sessions"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={sessionsLoading}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              aria-label="Refresh today's sessions"
+            >
+              <RefreshCw className={`h-4 w-4 ${sessionsLoading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:text-slate-500 dark:hover:bg-slate-900 dark:hover:text-slate-300"
+              aria-label="Close today's sessions"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         <div className="space-y-6 p-6">
-          <div className="flex flex-col gap-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 dark:border-blue-900 dark:bg-blue-950/40 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-col gap-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 dark:border-blue-900 dark:bg-blue-950/40">
             <div className="flex gap-3">
               <AlertCircle className="h-5 w-5 text-blue-600 dark:text-blue-300" />
               <div>
@@ -87,14 +99,6 @@ export const TodaysSessionsModal: React.FC<TodaysSessionsModalProps> = ({ onClos
                 </p>
               </div>
             </div>
-            <button
-              onClick={handleRefresh}
-              disabled={sessionsLoading}
-              className="inline-flex items-center gap-2 rounded-md border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-blue-800 dark:text-blue-200 dark:hover:bg-blue-900/40"
-            >
-              <RefreshCw className={`h-4 w-4 ${sessionsLoading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
           </div>
 
           {sessionsError && !sessionsLoading ? (

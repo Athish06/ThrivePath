@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowRight,
   HeartPulse,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { FaceAvatar, faceAvatarStyles } from './FaceAvatar';
 
@@ -23,6 +25,8 @@ export const RegistrationPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [characterState, setCharacterState] = useState('');
   const [passwordError, setPasswordError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const navigate = useNavigate();
 
   const handleEmailFocus = () => {
@@ -339,20 +343,30 @@ export const RegistrationPage: React.FC = () => {
                         <label htmlFor="password" className="text-xs font-semibold uppercase tracking-[0.35em] text-slate-500">
                           Password
                         </label>
-                        <input
-                          id="password"
-                          name="password"
-                          type="password"
-                          value={formData.password}
-                          onChange={handleInputChange}
-                          onFocus={handlePasswordFocus}
-                          onBlur={handleInputBlur}
-                          required
-                          minLength={8}
-                          className="w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition focus:border-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-900/10"
-                          placeholder="At least 8 characters"
-                          autoComplete="new-password"
-                        />
+                        <div className="relative">
+                          <input
+                            id="password"
+                            name="password"
+                            type={showPassword ? "text" : "password"}
+                            value={formData.password}
+                            onChange={handleInputChange}
+                            onFocus={handlePasswordFocus}
+                            onBlur={handleInputBlur}
+                            required
+                            minLength={8}
+                            className="w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 pr-12 text-sm font-medium text-slate-900 shadow-sm transition focus:border-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-900/10"
+                            placeholder="At least 8 characters"
+                            autoComplete="new-password"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword(!showPassword)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700 transition-colors"
+                            aria-label={showPassword ? "Hide password" : "Show password"}
+                          >
+                            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
                       </div>
                       <div className="space-y-2">
                         <label
@@ -361,20 +375,30 @@ export const RegistrationPage: React.FC = () => {
                         >
                           Confirm password
                         </label>
-                        <input
-                          id="confirmPassword"
-                          name="confirmPassword"
-                          type="password"
-                          value={formData.confirmPassword}
-                          onChange={handleInputChange}
-                          onFocus={handlePasswordFocus}
-                          onBlur={handleInputBlur}
-                          required
-                          minLength={8}
-                          className="w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 text-sm font-medium text-slate-900 shadow-sm transition focus:border-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-900/10"
-                          placeholder="Repeat password"
-                          autoComplete="new-password"
-                        />
+                        <div className="relative">
+                          <input
+                            id="confirmPassword"
+                            name="confirmPassword"
+                            type={showConfirmPassword ? "text" : "password"}
+                            value={formData.confirmPassword}
+                            onChange={handleInputChange}
+                            onFocus={handlePasswordFocus}
+                            onBlur={handleInputBlur}
+                            required
+                            minLength={8}
+                            className="w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 pr-12 text-sm font-medium text-slate-900 shadow-sm transition focus:border-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-900/10"
+                            placeholder="Repeat password"
+                            autoComplete="new-password"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700 transition-colors"
+                            aria-label={showConfirmPassword ? "Hide password" : "Show password"}
+                          >
+                            {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
                         {passwordError && (
                           <p className="text-xs font-semibold text-rose-600">{passwordError}</p>
                         )}

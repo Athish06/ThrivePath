@@ -5,10 +5,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useData } from '../../context/DataContext';
 import {
   Search,
-  Filter,
   User,
-  Sparkles,
-  Star,
   Clock,
   AlertCircle,
   RefreshCw,
@@ -21,11 +18,13 @@ import {
   ChevronDown,
   ClipboardList,
   FileText,
-  ArrowLeft
+  ArrowLeft,
+  Plus
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { LoadingSpinner } from '../shared/LoadingSpinner';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
+import { FilterDropdown, FilterOption } from '../shared/FilterDropdown';
 import { LittleLearner } from '../../types';
 
 export const MyLearners: React.FC = () => {
@@ -46,6 +45,14 @@ export const MyLearners: React.FC = () => {
   };
 
   const learners = (myStudents ?? []) as unknown as LittleLearner[];
+
+  const learnerFilterOptions: FilterOption[] = [
+    { value: 'all', label: 'All Status', icon: <Users className="h-4 w-4" />, color: 'slate' },
+    { value: 'active', label: 'Active', icon: <Zap className="h-4 w-4" />, color: 'emerald' },
+    { value: 'new', label: 'New Enrollments', icon: <Plus className="h-4 w-4" />, color: 'blue' },
+    { value: 'assessment_due', label: 'Assessment Due', icon: <ClipboardList className="h-4 w-4" />, color: 'amber' },
+    { value: 'inactive', label: 'Inactive', icon: <AlertCircle className="h-4 w-4" />, color: 'slate' },
+  ];
 
   const filteredStudents = learners.filter((student) => {
     const matchesSearch = student.name.toLowerCase().includes(searchTerm.toLowerCase());
@@ -366,7 +373,7 @@ export const MyLearners: React.FC = () => {
           transition={{ delay: 0.2, duration: 0.6 }}
           className="glass-card rounded-2xl p-6"
         >
-          <div className="flex flex-col sm:flex-row gap-4">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex-1 relative">
               <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
               <input
@@ -377,19 +384,14 @@ export const MyLearners: React.FC = () => {
                 className="w-full pl-12 pr-4 py-3 bg-white/50 dark:bg-slate-900/70 border border-slate-200/50 dark:border-slate-700/50 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent backdrop-blur-sm transition-all text-slate-800 dark:text-white placeholder-slate-500 dark:placeholder-slate-400"
               />
             </div>
-            <div className="relative">
-              <Filter className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
-              <select
+            <div className="w-full md:w-auto">
+              <FilterDropdown
+                options={learnerFilterOptions}
                 value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="pl-12 pr-8 py-3 bg-white/50 dark:bg-slate-900/70 border border-slate-200/50 dark:border-slate-700/50 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent backdrop-blur-sm transition-all text-slate-800 dark:text-white appearance-none min-w-[160px]"
-              >
-                <option value="all">All Status</option>
-                <option value="active">Active</option>
-                <option value="new">New Enrollments</option>
-                <option value="assessment_due">Assessment Due</option>
-                <option value="inactive">Inactive</option>
-              </select>
+                onChange={setSelectedStatus}
+                placeholder="Filter by status"
+                className="w-full md:w-[220px]"
+              />
             </div>
           </div>
 
@@ -528,27 +530,7 @@ export const MyLearners: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="mt-6 pt-4 border-t border-slate-200/50 dark:border-slate-700/50 space-y-4">
-                      <div>
-                        <div className="flex items-center gap-2 mb-3">
-                          <Star className="h-4 w-4 text-violet-600 dark:text-violet-400" />
-                          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">Current Goals:</p>
-                        </div>
-                        <div className="space-y-1">
-                          {student.goals?.slice(0, 2).map((goal: string, goalIndex: number) => (
-                            <p key={goalIndex} className="text-sm text-slate-600 dark:text-slate-400 flex items-start">
-                              <Sparkles className="h-3 w-3 mr-2 mt-0.5 text-violet-500 dark:text-violet-400 flex-shrink-0" />
-                              <span className="truncate">{goal}</span>
-                            </p>
-                          ))}
-                          {student.goals?.length > 2 && (
-                            <p className="text-sm text-violet-600 dark:text-violet-400 font-medium">
-                              +{student.goals.length - 2} more cognitive targets
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
+                    <div className="mt-6 pt-4 border-t border-slate-200/50 dark:border-slate-700/50">
                       <div className="flex justify-end">
                         <button
                           type="button"

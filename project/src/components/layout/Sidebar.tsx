@@ -16,7 +16,7 @@ import {
   ChevronRight,
   GraduationCap,
   Calendar,
-  FileText,
+  Layers,
   HeadphonesIcon,
   PanelLeftClose,
   PanelRightClose,
@@ -56,7 +56,6 @@ const therapistMenuItems: MenuSectionType[] = [
         submenu: [
           { label: 'All Learners', path: '/learners' },
           { label: 'My Learners', path: '/learners/my-learners' },
-          { label: 'New Enrollments', path: '/learners/new' },
           { label: 'Temporary Enrollment', path: '/learners/temp-students' },
           { label: 'Activities', path: '/activities' },
         ]
@@ -78,14 +77,14 @@ const therapistMenuItems: MenuSectionType[] = [
         path: '/sessions'
       },
       { 
-        icon: BarChart3, 
-        label: 'Reports & Analytics', 
-        path: '/reports' 
+        icon: Layers, 
+        label: 'Active Sessions', 
+        path: '/sessions/active'
       },
       { 
-        icon: FileText, 
-        label: 'Documentation', 
-        path: '/documentation' 
+        icon: BarChart3, 
+        label: 'Progress Analysis', 
+        path: '/progress-analysis' 
       },
     ]
   }

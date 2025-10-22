@@ -6,13 +6,20 @@ from users.users import create_user
 from authentication.authh import authenticate_user_detailed, create_access_token, get_current_user, update_last_login
 from users.profiles import get_therapist_profile, get_parent_profile, update_therapist_profile, update_parent_profile
 from users.settings import get_therapist_settings, update_therapist_profile_settings, update_therapist_account_settings, get_therapist_profile_settings, get_therapist_account_settings
-from students.students import get_all_students, get_student_by_id, get_students_by_therapist, get_temp_students_by_therapist, enroll_student
+from students.students import (
+    get_all_students,
+    get_student_by_id,
+    get_students_by_therapist,
+    get_temp_students_by_therapist,
+    enroll_student,
+    update_student_assessment as update_student_assessment_record
+)
 from notes.notes import get_notes_by_date_and_therapist, create_session_note, get_notes_with_dates_for_therapist, SessionNoteCreate, SessionNoteResponse
 from sessions.sessions import (
     create_session, get_sessions_by_therapist, get_todays_sessions_by_therapist, get_session_by_id, update_session, delete_session,
-    add_activity_to_session, get_session_activities, get_available_child_goals, get_master_activities,
-    remove_activity_from_session, assign_ai_activity_to_child, SessionCreate, SessionUpdate, SessionResponse,
-    SessionActivityCreate, SessionActivityUpdate, SessionActivityResponse, ChildGoalResponse, ActivityResponse
+    add_activity_to_session, get_session_activities, get_available_child_goals, get_master_activities, get_assessment_tool_activities,
+    remove_activity_from_session, assign_ai_activity_to_child, mark_activity_completed, update_session_activity, SessionCreate, SessionUpdate, SessionResponse,
+    SessionActivityCreate, SessionActivityUpdate, SessionActivityResponse, ChildGoalResponse, ActivityResponse, SessionComplete
 )
 from sessions.session_status import (
     update_session_status, start_session, complete_session, cancel_session,
@@ -24,6 +31,11 @@ from sessions.session_status import (
     get_continuous_notifications, handle_dynamic_schedule_changes,
     get_monitoring_service_status, trigger_manual_status_update, trigger_manual_notification_check,
     SessionStatusUpdate, SessionNotification, SessionStatusResponse
+)
+from sessions.rescheduleSessions import (
+    check_session_ready_for_start,
+    cascade_reschedule_sessions,
+    CascadeRescheduleRequest,
 )
 from ai_services import (
     extract_text_from_file,
@@ -162,6 +174,9 @@ class StudentEnrollment(BaseModel):
     uploadedFilePath: Optional[str] = None
     uploadedFileName: Optional[str] = None
 
+class StudentAssessmentUpdate(BaseModel):
+    assessmentDetails: Optional[Dict[str, Any]] = None
+
 class DeleteFileRequest(BaseModel):
     filePath: str
 
@@ -220,10 +235,19 @@ class AssistantMessageModel(BaseModel):
     activities: Optional[List[Dict[str, Any]]] = None
 
 
+class ActivityFocusContext(BaseModel):
+    label: str
+    activities: List[Dict[str, Any]]
+    instruction: Optional[str] = None
+    source: Optional[str] = None
+
+
 class ActivityChatMessageRequest(BaseModel):
     message: str
     ai_preferences: Optional[str] = None  # Custom AI behavior instructions
     session_notes: Optional[List[Dict[str, Any]]] = None  # Selected session notes with context
+    focus_context: Optional[ActivityFocusContext] = None  # Therapist-selected activities to emphasise
+    notes_instruction: Optional[str] = None  # Therapist guidance on how to use attached notes
 
 
 class ActivityChatMessageResponse(BaseModel):
@@ -254,6 +278,19 @@ class SessionNoteItem(BaseModel):
     end_time: str
     therapist_notes: Optional[str] = None
     status: str
+
+
+class RescheduledSessionItem(BaseModel):
+    session_id: int
+    student_name: Optional[str] = None
+    previous_date: str
+    new_date: str
+
+
+class CascadeRescheduleResponse(BaseModel):
+    total_updated: int
+    sessions: List[RescheduledSessionItem]
+    include_weekends: bool
 
 
 
@@ -383,13 +420,14 @@ async def register_user(user_data: UserRegistration):
     - Validates role-based registration data
     - Creates associated profile records
     """
+    print(user_data)
     try:
         # Validate role
         if user_data.role not in ["therapist", "parent"]:
             raise HTTPException(status_code=400, detail="Invalid role. Must be 'therapist' or 'parent'")
         
         # Create user in database with profile data
-        new_user = create_user(
+        new_user = await create_user(
             email=user_data.email,
             password=user_data.password,
             role=user_data.role,
@@ -928,6 +966,42 @@ async def enroll_student_route(
         # Remove file information from student data (not needed for enrollment)
         file_path = student_dict.pop('uploadedFilePath', None)
         file_name = student_dict.pop('uploadedFileName', None)
+
+        # Normalize assessment payload and determine enrollment status
+        assessment_details = student_dict.get('assessmentDetails') or {}
+        clean_assessment_details = {}
+        has_clinical_snapshot_scores = False
+        has_non_snapshot_scores = False
+
+        if isinstance(assessment_details, dict):
+            for tool_id, detail in assessment_details.items():
+                if not isinstance(detail, dict):
+                    continue
+                items = detail.get('items') if isinstance(detail.get('items'), dict) else None
+                if not items:
+                    continue
+
+                valid_scores = [score for score in items.values() if isinstance(score, (int, float))]
+                if not valid_scores:
+                    continue
+
+                clean_assessment_details[tool_id] = {
+                    'items': items,
+                    'average': detail.get('average')
+                }
+
+                if tool_id == 'clinical-snapshots':
+                    has_clinical_snapshot_scores = True
+                else:
+                    has_non_snapshot_scores = True
+
+        prior_diagnosis = bool(student_dict.get('priorDiagnosis'))
+        if prior_diagnosis:
+            student_dict['status'] = 'active' if (has_clinical_snapshot_scores or has_non_snapshot_scores) else 'assessment_due'
+        else:
+            student_dict['status'] = 'active' if has_non_snapshot_scores else 'assessment_due'
+
+        student_dict['assessmentDetails'] = clean_assessment_details or None
         
         # Enroll the student
         student = enroll_student(student_dict)
@@ -995,6 +1069,94 @@ async def enroll_student_route(
     except Exception as e:
         logger.error(f"Error enrolling student: {e}")
         raise HTTPException(status_code=500, detail="Failed to enroll student")
+
+@app.post("/api/students/{student_id}/assessment", response_model=StudentResponse)
+async def update_student_assessment_route(
+    student_id: int,
+    assessment_update: StudentAssessmentUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Persist assessment results and promote learners when requirements are met."""
+    try:
+        if current_user["role"] != "therapist":
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied. Only therapists can update assessments."
+            )
+
+        updated_student = update_student_assessment_record(
+            student_id,
+            current_user["id"],
+            assessment_update.assessmentDetails
+        )
+
+        if not updated_student:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        return StudentResponse(**updated_student)
+
+    except HTTPException:
+        raise
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating assessment for student {student_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update assessment details")
+
+@app.put("/api/students/{student_id}/assessment-details")
+async def update_assessment_details_route(
+    student_id: int,
+    assessment_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update assessment_details for a child and promote from temporary enrollment.
+    Used when completing assessment sessions in ActiveSessions.
+    """
+    try:
+        if current_user["role"] != "therapist":
+            raise HTTPException(status_code=403, detail="Only therapists can update assessments")
+
+        supabase = get_supabase_client()
+        
+        # Get current assessment_details
+        child_result = supabase.table('children').select('assessment_details, status').eq('id', student_id).single().execute()
+        if not child_result.data:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        current_details = child_result.data.get('assessment_details') or {}
+        new_details = assessment_data.get('assessment_details', {})
+        
+        # Merge new assessment data with existing
+        merged_details = {**current_details, **new_details}
+        
+        # Update children table
+        update_data = {
+            'assessment_details': merged_details,
+        }
+        
+        # If child is temporary, promote to active
+        if child_result.data.get('status') == 'assessment_due':
+            update_data['status'] = 'active'
+        
+        result = supabase.table('children').update(update_data).eq('id', student_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to update assessment details")
+        
+        return {
+            "success": True,
+            "message": "Assessment details updated successfully",
+            "status": update_data.get('status', child_result.data.get('status'))
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating assessment details for student {student_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== SESSION NOTES MANAGEMENT ====================
 # Therapy session note creation, retrieval, and date tracking
@@ -1239,6 +1401,29 @@ async def get_master_activities_endpoint(current_user: dict = Depends(get_curren
         logger.error(f"Error fetching master activities: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch master activities")
 
+@app.get("/api/assessment-tools")
+async def get_assessment_tools_endpoint(current_user: dict = Depends(get_current_user)):
+    """
+    Get assessment tool activities grouped by tool
+    - ISAA, INDT-ADHD, and Clinical Snapshots with their sub-activities
+    - Used for assessment session planning and execution
+    """
+    try:
+        if current_user["role"] != "therapist":
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied. Only therapists can access assessment tools."
+            )
+        
+        assessment_tools = await get_assessment_tool_activities()
+        
+        return assessment_tools
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching assessment tools: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch assessment tools")
+
 @app.post("/api/activities/suggest", response_model=List[ActivitySuggestionResponse])
 async def suggest_activities_endpoint(
     request: ActivitySuggestionRequest,
@@ -1310,7 +1495,9 @@ async def send_activity_chat_message_endpoint(
             session_id,
             request.message,
             ai_preferences=request.ai_preferences,
-            session_notes=request.session_notes
+            session_notes=request.session_notes,
+            focus_context=request.focus_context,
+            notes_instruction=request.notes_instruction
         )
         return ActivityChatMessageResponse(session_id=session_id, messages=assistant_messages)
     except HTTPException:
@@ -1505,6 +1692,62 @@ async def remove_activity_from_session_endpoint(session_id: int, activity_id: in
         logger.error(f"Error removing activity {activity_id} from session {session_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to remove activity from session")
 
+
+@app.put("/api/sessions/{session_id}/activities/{activity_id}", response_model=SessionActivityResponse)
+async def update_session_activity_endpoint(
+    session_id: int,
+    activity_id: int,
+    activity_update: SessionActivityUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update session activity with actual duration and performance notes
+    - Records actual time spent on activity during session
+    - Captures performance observations and notes
+    - Used during active session to track completion
+    """
+    try:
+        therapist_id = current_user['id']
+        updated_activity = await update_session_activity(activity_id, session_id, therapist_id, activity_update)
+        return updated_activity
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating activity {activity_id} in session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update session activity")
+
+
+@app.post("/api/students/{child_id}/activities/{activity_id}/complete")
+async def mark_activity_completed_endpoint(child_id: int, activity_id: int, current_user: dict = Depends(get_current_user)):
+    """
+    Mark a child goal activity as completed
+    - Updates current_status to 'completed' in child_goals table
+    - Sets date_mastered to current date
+    - Used during active sessions to track activity completion
+    """
+    try:
+        from sessions.sessions import mark_activity_completed
+        
+        result = await mark_activity_completed(child_id, activity_id)
+        
+        if not result['success']:
+            raise HTTPException(status_code=400, detail=result['message'])
+        
+        return {
+            "message": result['message'],
+            "child_goal_id": result['child_goal_id'],
+            "previous_status": result['previous_status'],
+            "new_status": result['new_status']
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error marking activity {activity_id} as completed for child {child_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to mark activity as completed")
+
+
 # ==================== SESSION STATUS MANAGEMENT ====================
 # Routes for session status updates and notifications
 
@@ -1537,24 +1780,84 @@ async def start_session_endpoint(session_id: int, current_user: dict = Depends(g
     """
     try:
         therapist_id = current_user['id']
+        validation = await check_session_ready_for_start(session_id, therapist_id)
+
+        if validation.get('exists') is False:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if validation.get('requires_reschedule'):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "SESSION_NEEDS_RESCHEDULE",
+                    "message": validation.get('reason') or "Session requires rescheduling before it can be started.",
+                    "session": validation.get('session'),
+                    "upcoming": validation.get('upcoming'),
+                }
+            )
+
         result = await start_session(session_id, therapist_id)
         if not result:
             raise HTTPException(status_code=404, detail="Session not found or cannot be started")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error starting session {session_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to start session")
 
+
+@app.post(
+    "/api/sessions/{session_id}/reschedule/cascade",
+    response_model=CascadeRescheduleResponse,
+)
+async def cascade_reschedule_endpoint(
+    session_id: int,
+    payload: CascadeRescheduleRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Shift the selected session and all upcoming scheduled sessions by one day.
+    - Applies therapist working hours and personal time validation
+    - Optional weekend inclusion controlled by request payload
+    """
+
+    try:
+        therapist_id = current_user["id"]
+        result = await cascade_reschedule_sessions(
+            session_id=session_id,
+            therapist_id=therapist_id,
+            include_weekends=payload.include_weekends,
+        )
+        session_items = [RescheduledSessionItem(**item) for item in result.get("sessions", [])]
+        return CascadeRescheduleResponse(
+            total_updated=result.get("total_updated", 0),
+            sessions=session_items,
+            include_weekends=result.get("include_weekends", False),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(
+            "Error cascading reschedule for session %s by therapist %s: %s",
+            session_id,
+            current_user.get("id"),
+            e,
+        )
+        raise HTTPException(status_code=500, detail="Failed to cascade reschedule sessions")
+
+
 @app.post("/api/sessions/{session_id}/complete", response_model=SessionStatusResponse)
-async def complete_session_endpoint(session_id: int, current_user: dict = Depends(get_current_user)):
+async def complete_session_endpoint(session_data: SessionComplete, session_id: int, current_user: dict = Depends(get_current_user)):
     """
     Complete an ongoing session (change status to completed)
     - Used when session ends
     - Updates status from 'ongoing' to 'completed'
+    - Accepts therapist notes to be saved with the session
     """
     try:
         therapist_id = current_user['id']
-        result = await complete_session(session_id, therapist_id)
+        result = await complete_session(session_id, therapist_id, session_data.therapist_notes)
         if not result:
             raise HTTPException(status_code=404, detail="Session not found or cannot be completed")
         return result

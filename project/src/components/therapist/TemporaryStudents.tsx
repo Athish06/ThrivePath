@@ -1,18 +1,25 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useData } from '../../context/DataContext';
-import { Search, Filter, User, Sparkles, Star, Clock, AlertCircle, RefreshCw, FileText, ClipboardList } from 'lucide-react';
+import { Search, User, Clock, AlertCircle, RefreshCw, FileText } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { LoadingSpinner } from '../shared/LoadingSpinner';
+import { FilterDropdown, FilterOption } from '../shared/FilterDropdown';
 
 export const TemporaryStudents: React.FC = () => {
   useAuth();
   const { tempStudents, studentsLoading, studentsError, refreshTempStudentsPage } = useData();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('all');
-  const navigate = useNavigate();
+
+  const tempStudentFilterOptions: FilterOption[] = [
+    { value: 'all', label: 'All Status', icon: <User className="h-4 w-4" />, color: 'slate' },
+    { value: 'active', label: 'Active', icon: <AlertCircle className="h-4 w-4" />, color: 'emerald' },
+    { value: 'new', label: 'New Enrollments', icon: <FileText className="h-4 w-4" />, color: 'blue' },
+    { value: 'assessment_due', label: 'Assessment Due', icon: <Clock className="h-4 w-4" />, color: 'amber' },
+    { value: 'inactive', label: 'Inactive', icon: <RefreshCw className="h-4 w-4" />, color: 'slate' },
+  ];
 
   // Data is automatically loaded by DataContext
 
@@ -85,7 +92,7 @@ export const TemporaryStudents: React.FC = () => {
               </h1>
             </div>
             <p className="text-slate-600 dark:text-slate-400 max-w-2xl mx-auto">
-              Students with prior diagnosis awaiting full enrollment processing
+              Students whose enrollments stay in Temporary status until assessments or clinical snapshots are completed
             </p>
           </div>
           <motion.button 
@@ -110,7 +117,7 @@ export const TemporaryStudents: React.FC = () => {
           transition={{ delay: 0.2, duration: 0.6 }}
           className="glass-card rounded-2xl p-6"
         >
-          <div className="flex flex-col sm:flex-row gap-4">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex-1 relative">
               <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
               <input
@@ -121,19 +128,14 @@ export const TemporaryStudents: React.FC = () => {
                 className="w-full pl-12 pr-4 py-3 bg-white/50 dark:bg-slate-900/70 border border-slate-200/50 dark:border-slate-700/50 rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-transparent backdrop-blur-sm transition-all text-slate-800 dark:text-white placeholder-slate-500 dark:placeholder-slate-400"
               />
             </div>
-            <div className="relative">
-              <Filter className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-slate-400" />
-              <select
+            <div className="w-full md:w-auto">
+              <FilterDropdown
+                options={tempStudentFilterOptions}
                 value={selectedStatus}
-                onChange={(e) => setSelectedStatus(e.target.value)}
-                className="pl-12 pr-8 py-3 bg-white/50 dark:bg-slate-900/70 border border-slate-200/50 dark:border-slate-700/50 rounded-xl focus:ring-2 focus:ring-amber-500 focus:border-transparent backdrop-blur-sm transition-all text-slate-800 dark:text-white appearance-none min-w-[160px]"
-              >
-                <option value="all">All Status</option>
-                <option value="active">Active</option>
-                <option value="new">New Enrollments</option>
-                <option value="assessment_due">Assessment Due</option>
-                <option value="inactive">Inactive</option>
-              </select>
+                onChange={setSelectedStatus}
+                placeholder="Filter by status"
+                className="w-full md:w-[220px]"
+              />
             </div>
           </div>
 
@@ -224,8 +226,7 @@ export const TemporaryStudents: React.FC = () => {
                     exit={{ opacity: 0, y: -20 }}
                     transition={{ delay: index * 0.1, duration: 0.5 }}
                     whileHover={{ scale: 1.02, y: -4 }}
-                    onClick={() => navigate(`/learners/${student.id}`)}
-                    className="glass-card rounded-2xl p-6 cursor-pointer group hover:shadow-xl transition-all duration-300 border border-slate-200/50 dark:border-slate-700/50 hover:border-amber-300 dark:hover:border-amber-600"
+                    className="glass-card rounded-2xl p-6 group hover:shadow-xl transition-all duration-300 border border-slate-200/50 dark:border-slate-700/50 hover:border-amber-300 dark:hover:border-amber-600"
                   >
                     <div className="flex items-center space-x-4 mb-6">
                       {student.photo ? (
@@ -265,7 +266,7 @@ export const TemporaryStudents: React.FC = () => {
 
                     <div className="space-y-4">
                       <div className="flex items-center text-sm text-slate-600 dark:text-slate-400">
-                        <ClipboardList className="h-4 w-4 mr-2 text-amber-600 dark:text-amber-400" />
+                        <FileText className="h-4 w-4 mr-2 text-amber-600 dark:text-amber-400" />
                         <span>
                           {student.goals?.length
                             ? `${student.goals.length} active goal${student.goals.length === 1 ? '' : 's'}`
@@ -280,22 +281,10 @@ export const TemporaryStudents: React.FC = () => {
                     </div>
 
                     <div className="mt-6 pt-4 border-t border-slate-200/50 dark:border-slate-700/50">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Star className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-                        <p className="text-sm font-medium text-slate-700 dark:text-slate-300">Current Goals:</p>
-                      </div>
-                      <div className="space-y-1">
-                        {student.goals?.slice(0, 2).map((goal: any, goalIndex: number) => (
-                          <p key={goalIndex} className="text-sm text-slate-600 dark:text-slate-400 flex items-start">
-                            <Sparkles className="h-3 w-3 mr-2 mt-0.5 text-amber-500 dark:text-amber-400 flex-shrink-0" />
-                            <span className="truncate">{goal}</span>
-                          </p>
-                        ))}
-                        {student.goals?.length > 2 && (
-                          <p className="text-sm text-amber-600 dark:text-amber-400 font-medium">
-                            +{student.goals.length - 2} more cognitive targets
-                          </p>
-                        )}
+                      <div className="text-center">
+                        <p className="text-sm text-slate-600 dark:text-slate-400">
+                          Temporary enrollment - awaiting full processing
+                        </p>
                       </div>
                     </div>
                   </motion.div>

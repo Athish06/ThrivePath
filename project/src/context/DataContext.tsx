@@ -6,6 +6,18 @@ interface Student {
   name: string;
   firstName: string;
   lastName: string;
+  status?: string;
+  priorDiagnosis?: boolean;
+  assessmentDetails?: Record<string, unknown> | null;
+}
+
+export interface RecentActivity {
+  id: string;
+  message: string;
+  time: string;
+  timestamp: number;
+  color: string;
+  type: 'session' | 'assessment' | 'learner' | 'report' | 'login';
 }
 
 interface BackendSession {
@@ -75,6 +87,10 @@ interface DataContextType {
 
   // Goal helpers
   getChildGoalsForLearner: (learnerId: string, options?: { force?: boolean }) => Promise<ChildGoal[]>;
+
+  // Recent activities tracking
+  recentActivities: RecentActivity[];
+  addActivity: (message: string, type: RecentActivity['type']) => void;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -113,6 +129,95 @@ export const DataProvider: React.FC<DataProviderProps> = ({ children }) => {
   const [studentsError, setStudentsError] = useState<string | null>(null);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
 
+  // Recent activities state
+  const [recentActivities, setRecentActivities] = useState<RecentActivity[]>(() => {
+    try {
+      const stored = localStorage.getItem('recent_activities');
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Add activity helper function
+  const addActivity = useCallback((message: string, type: RecentActivity['type']) => {
+    const colors = {
+      session: 'bg-green-500',
+      assessment: 'bg-blue-500',
+      learner: 'bg-purple-500',
+      report: 'bg-orange-500',
+      login: 'bg-teal-500',
+    };
+
+    const now = Date.now();
+    const newActivity: RecentActivity = {
+      id: `${now}-${Math.random()}`,
+      message,
+      time: 'Just now',
+      timestamp: now,
+      color: colors[type],
+      type,
+    };
+
+    setRecentActivities((prev) => {
+      const updated = [newActivity, ...prev].slice(0, 10); // Keep only last 10 activities
+      localStorage.setItem('recent_activities', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  // Listen for activity events from other components
+  useEffect(() => {
+    const handleActivityEvent = (e: Event) => {
+      const customEvent = e as CustomEvent<{ message: string; type: RecentActivity['type'] }>;
+      if (customEvent.detail) {
+        addActivity(customEvent.detail.message, customEvent.detail.type);
+      }
+    };
+
+    window.addEventListener('activityAdded', handleActivityEvent);
+    return () => window.removeEventListener('activityAdded', handleActivityEvent);
+  }, [addActivity]);
+
+  // Update activity times periodically
+  useEffect(() => {
+    const updateTimes = () => {
+      setRecentActivities((prev) => {
+        const updated = prev.map((activity) => {
+          const diff = Date.now() - activity.timestamp;
+          const minutes = Math.floor(diff / 60000);
+          const hours = Math.floor(minutes / 60);
+          const days = Math.floor(hours / 24);
+
+          let timeStr = 'Just now';
+          if (days > 0) {
+            timeStr = `${days} day${days > 1 ? 's' : ''} ago`;
+          } else if (hours > 0) {
+            timeStr = `${hours} hour${hours > 1 ? 's' : ''} ago`;
+          } else if (minutes > 0) {
+            timeStr = `${minutes} minute${minutes > 1 ? 's' : ''} ago`;
+          }
+
+          return { ...activity, time: timeStr };
+        });
+
+        // Only update localStorage if times actually changed
+        const timesChanged = updated.some((act, idx) => act.time !== prev[idx]?.time);
+        if (timesChanged) {
+          localStorage.setItem('recent_activities', JSON.stringify(updated));
+        }
+        
+        return updated;
+      });
+    };
+
+    // Update times every minute
+    const interval = setInterval(updateTimes, 60000);
+    updateTimes(); // Initial update
+
+    return () => clearInterval(interval);
+  }, []);
+
   // Transform backend student data to frontend LittleLearner format
   const transformStudentData = (student: any): LittleLearner => {
     return {
@@ -129,6 +234,7 @@ export const DataProvider: React.FC<DataProviderProps> = ({ children }) => {
       achievements: [], // Can be added later when available
       // New fields from backend
       medicalDiagnosis: student.medicalDiagnosis,
+      assessmentDetails: student.assessmentDetails || student.assessment_details, // Handle both camelCase and snake_case
       driveUrl: student.driveUrl,
       priorDiagnosis: student.priorDiagnosis,
       firstName: student.firstName,
@@ -398,7 +504,11 @@ export const DataProvider: React.FC<DataProviderProps> = ({ children }) => {
       refreshAllData,
 
       // Goal helpers
-      getChildGoalsForLearner
+      getChildGoalsForLearner,
+
+      // Recent activities
+      recentActivities,
+      addActivity
     }}>
       {children}
     </DataContext.Provider>
