@@ -79,6 +79,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const login = async (email: string, password: string) => {
     try {
+      // Clear all existing localStorage data before login
+      localStorage.clear();
+
       // Send login request to backend API
       const response = await fetch(buildApiUrl(API_ENDPOINTS.LOGIN), {
         method: 'POST',
@@ -98,8 +101,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
       const loginData = await response.json();
 
-      // Store JWT token and user data
+      // Store JWT tokens and user data
       localStorage.setItem('access_token', loginData.access_token);
+      localStorage.setItem('refresh_token', loginData.refresh_token);  // Store refresh token
       localStorage.setItem('user_data', JSON.stringify(loginData.user));
 
       // Convert backend user format to frontend User type
@@ -182,8 +186,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const logout = () => {
     setUser(null);
-    localStorage.removeItem('user_data');
-    localStorage.removeItem('access_token');
+    // Clear ALL localStorage data
+    localStorage.clear();
+    // Clear all cookies
+    document.cookie.split(";").forEach((c) => {
+      document.cookie = c
+        .replace(/^ +/, "")
+        .replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+    });
   };
 
   const register = async (userData: Partial<User> & { password: string }) => {

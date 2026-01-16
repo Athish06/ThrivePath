@@ -12,6 +12,7 @@ export const API_ENDPOINTS = {
     LOGIN: '/api/login',
     REGISTER: '/api/register',
     ME: '/api/me',
+    REFRESH_TOKEN: '/api/refresh-token',  // Token refresh endpoint
     TEST_AUTH: '/api/test-auth',
 
     // Profile
@@ -35,6 +36,7 @@ export const API_ENDPOINTS = {
     // Sessions
     SESSIONS: '/api/sessions',
     SESSIONS_TODAY: '/api/sessions/today',
+    SESSIONS_WITH_DETAILS: '/api/sessions/with-details',
     SESSION_BY_ID: (id: number) => `/api/sessions/${id}`,
     SESSION_STATUS: (id: number) => `/api/sessions/${id}/status`,
     SESSION_NOTIFICATION_SENT: (id: number) => `/api/sessions/${id}/notification-sent`,
@@ -57,6 +59,12 @@ export const API_ENDPOINTS = {
     NOTES: '/api/notes',
     NOTES_BY_DATE: (date: string) => `/api/notes/${date}`,
     NOTES_DATES_ALL: '/api/notes/dates/all',
+
+    // General Notes (not tied to sessions)
+    GENERAL_NOTES_CREATE: '/api/general-notes',
+    GENERAL_NOTES_BY_DATE: (date: string) => `/api/general-notes/${date}`,
+    GENERAL_NOTES_UPDATE: (noteId: number) => `/api/general-notes/${noteId}`,
+    GENERAL_NOTES_DELETE: (noteId: number) => `/api/general-notes/${noteId}`,
 
     // Files
     UPLOAD_DOCUMENT: '/api/upload-document',
@@ -109,7 +117,40 @@ export const getAuthHeadersForUpload = (): HeadersInit => {
 };
 
 /**
- * Make authenticated API request
+ * Refresh access token using refresh token
+ * @returns New access token or null if refresh failed
+ */
+const refreshAccessToken = async (): Promise<string | null> => {
+    try {
+        const refreshToken = localStorage.getItem('refresh_token');
+        if (!refreshToken) {
+            return null;
+        }
+
+        const response = await fetch(buildApiUrl(API_ENDPOINTS.REFRESH_TOKEN), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            // Store new access token
+            localStorage.setItem('access_token', data.access_token);
+            return data.access_token;
+        }
+
+        return null;
+    } catch (error) {
+        console.error('Token refresh failed:', error);
+        return null;
+    }
+};
+
+/**
+ * Make authenticated API request with automatic token refresh
  * @param endpoint - API endpoint path
  * @param options - Fetch options
  * @returns Fetch response
@@ -123,11 +164,41 @@ export const apiRequest = async (
         ? getAuthHeadersForUpload()
         : getAuthHeaders();
 
-    return fetch(url, {
+    // Make initial request
+    let response = await fetch(url, {
         ...options,
         headers: {
             ...headers,
             ...options.headers,
         },
     });
+
+    // If unauthorized, try to refresh token and retry
+    if (response.status === 401) {
+        console.log('🔄 Token expired, attempting refresh...');
+        const newToken = await refreshAccessToken();
+
+        if (newToken) {
+            console.log('✅ Token refreshed successfully, retrying request...');
+            // Retry request with new token
+            const newHeaders = options.body instanceof FormData
+                ? getAuthHeadersForUpload()
+                : getAuthHeaders();
+
+            response = await fetch(url, {
+                ...options,
+                headers: {
+                    ...newHeaders,
+                    ...options.headers,
+                },
+            });
+        } else {
+            console.error('❌ Token refresh failed, redirecting to login...');
+            // Clear storage and redirect to login
+            localStorage.clear();
+            window.location.href = '/login';
+        }
+    }
+
+    return response;
 };
