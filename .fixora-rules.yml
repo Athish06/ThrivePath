@@ -1,0 +1,108 @@
+rules:
+- id: fixora-wrapper-activesessiondetailmodal
+  pattern-either:
+  - pattern: function ActiveSessionDetailModal(...) { ... }
+  - pattern: const ActiveSessionDetailModal = (...) => { ... }
+  - pattern: let ActiveSessionDetailModal = (...) => { ... }
+  - pattern: var ActiveSessionDetailModal = (...) => { ... }
+  - pattern: this.ActiveSessionDetailModal = (...) => { ... }
+  - pattern: this.ActiveSessionDetailModal = function(...) { ... }
+  - pattern: 'ActiveSessionDetailModal: (...) => { ... }'
+  - pattern: 'ActiveSessionDetailModal: function(...) { ... }'
+  - pattern: ActiveSessionDetailModal(...) { ... }
+  - pattern: ActiveSessionDetailModal = (...) => { ... }
+  - pattern: ActiveSessionDetailModal = function(...) { ... }
+  message: 'Vulnerable function ''ActiveSessionDetailModal()'' wraps fetch. Vulnerability:
+    SQL Injection. User-controlled session.id is directly concatenated into the URL
+    without proper sanitization or parameterization.'
+  severity: ERROR
+  languages:
+  - javascript
+  - typescript
+  metadata:
+    category: security
+    technology:
+    - javascript
+    - typescript
+    source: fixora-ai-analysis
+    vulnerability_type: SQL Injection
+    confidence: HIGH
+    wrapper_defined_in: project/src/components/sessions/ActiveSessionDetailModal.tsx
+    wraps:
+    - fetch
+    modules_used:
+    - fetch
+    cwe: &id001
+    - CWE-89
+    owasp: &id002
+    - A03:2021
+- id: fixora-wrapper-createnote
+  pattern-either:
+  - pattern: function createNote(...) { ... }
+  - pattern: const createNote = (...) => { ... }
+  - pattern: let createNote = (...) => { ... }
+  - pattern: var createNote = (...) => { ... }
+  - pattern: this.createNote = (...) => { ... }
+  - pattern: this.createNote = function(...) { ... }
+  - pattern: 'createNote: (...) => { ... }'
+  - pattern: 'createNote: function(...) { ... }'
+  - pattern: createNote(...) { ... }
+  - pattern: createNote = (...) => { ... }
+  - pattern: createNote = function(...) { ... }
+  message: 'Vulnerable function ''createNote()'' wraps apiRequest. Vulnerability:
+    SQL Injection. User input is sent in the request body, but it''s not clear if
+    the backend properly sanitizes the input'
+  severity: WARNING
+  languages:
+  - javascript
+  - typescript
+  metadata:
+    category: security
+    technology:
+    - javascript
+    - typescript
+    source: fixora-ai-analysis
+    vulnerability_type: SQL Injection
+    confidence: MEDIUM
+    wrapper_defined_in: project/src/components/therapist/NotesViewer.tsx
+    wraps:
+    - apiRequest
+    modules_used:
+    - apiRequest
+    cwe: *id001
+    owasp: *id002
+- id: fixora-wrapper-handlesessionadd
+  pattern-either:
+  - pattern: function handleSessionAdd(...) { ... }
+  - pattern: const handleSessionAdd = (...) => { ... }
+  - pattern: let handleSessionAdd = (...) => { ... }
+  - pattern: var handleSessionAdd = (...) => { ... }
+  - pattern: this.handleSessionAdd = (...) => { ... }
+  - pattern: this.handleSessionAdd = function(...) { ... }
+  - pattern: 'handleSessionAdd: (...) => { ... }'
+  - pattern: 'handleSessionAdd: function(...) { ... }'
+  - pattern: handleSessionAdd(...) { ... }
+  - pattern: handleSessionAdd = (...) => { ... }
+  - pattern: handleSessionAdd = function(...) { ... }
+  message: 'Vulnerable function ''handleSessionAdd()'' wraps console.log. Vulnerability:
+    SQL Injection. User input is logged to the console, but it''s not clear if the
+    backend properly sanitizes the input'
+  severity: WARNING
+  languages:
+  - javascript
+  - typescript
+  metadata:
+    category: security
+    technology:
+    - javascript
+    - typescript
+    source: fixora-ai-analysis
+    vulnerability_type: SQL Injection
+    confidence: MEDIUM
+    wrapper_defined_in: project/src/components/therapist/QuickActions.tsx
+    wraps:
+    - console.log
+    modules_used:
+    - console
+    cwe: *id001
+    owasp: *id002
